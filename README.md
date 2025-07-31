@@ -8,5 +8,6 @@ Setup-
     
 Scripts-
     tdse_pinn_test.py:
-        My absolute product of AI gooning! TBH used a limited amount of my own brain.
-        Utilizies a PINN (Physics-Informed Neural Network): Takes 3 coordinates (x, y, t), using tanh operations outputs a 2 coordinate wavefunction (real, imaginary)
+        I only moderately used my brain on this, AI-gooned most of the hard stuff.
+    tdse_adaptive.py:
+        This is just gemini's code, I don't advise running it until I refactor, it blew up my laptop earlier today

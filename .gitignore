@@ -7,7 +7,7 @@ balls-env/
 build/
 dist/
 
-outcmaes/
+outcmaes/*
 
 __pycache__/
 *.pyc

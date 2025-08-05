@@ -2,6 +2,8 @@ import numpy as np
 import torch
 import cma
 import time
+from pathlib import Path
+import matplotlib.pyplot as plt
 
 # Import our installed quantum dot library
 import qdotlib
@@ -19,8 +21,8 @@ elif ELECCONFIG == "DISORDERED":
         'name':   'disordered',
         'params': {
             'omega':      1.0,
-            'noise_amp':  0.1,
-            'corr_len':   10
+            'noise_amp':  1.0,
+            'corr_len':   5
         }
     }
 
@@ -37,13 +39,14 @@ else:
 
 
 
-
+_snapshot_done = False
 
 TIME_STEPS = 500 # Number of time steps in the simulation
 DT = 0.005 # Time step duration
 
 
 def objective_function(params):
+    global _snapshot_done
     control_amp, control_freq, control_phase, pulse_center_t, pulse_width = params
 
     # Ensure pulse width is positive
@@ -59,6 +62,37 @@ def objective_function(params):
         Nx=GRID_SIZE, Ny=GRID_SIZE, Nz=GRID_SIZE, dt=DT,
         potential_cfg=POTENTIAL_CONFIG 
     )
+
+    #Save the electron configuration potential graph to output folder
+    if not _snapshot_done:
+        _snapshot_done = True
+        project_root = Path(__file__).resolve().parent
+        print(project_root)
+        out_dir      = project_root / "outputinfo"
+        out_dir.mkdir(exist_ok=True)
+        zidx = Z.shape[2] // 2
+        V_np = V.cpu().numpy().real
+        #plotting
+        fig, ax = plt.subplots(figsize=(6,5))
+        width_x = dx * GRID_SIZE
+        width_y = dy * GRID_SIZE
+        im = ax.imshow(
+            V_np[:, :, zidx],
+            extent=[-width_x/2, width_x/2, -width_y/2, width_y/2],
+            origin="lower",
+            cmap="viridis"
+        )
+        ax.set_title(f"{POTENTIAL_CONFIG['name'].capitalize()} Potential (z={zidx})")
+        ax.set_xlabel("x"); ax.set_ylabel("y")
+        fig.colorbar(im, ax=ax, label="V(x,y)")
+
+        plt.tight_layout()
+        # save
+        filename = out_dir / f"{POTENTIAL_CONFIG['name']}_potential.png"
+        fig.savefig(filename, dpi=300)
+        plt.close(fig)
+
+
 
     # --- Get the initial and target states from our gate library ---
     volume = dy*dx*dz

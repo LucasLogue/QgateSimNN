@@ -38,7 +38,7 @@ psi0 = (
 psi = psi0.copy()
 
 #propagator values 
-halfkprop = np.exp(-.05j * K2 * dt) #using automic units h=m=1 
+halfkprop = np.exp(-.25j * K2 * dt) #using automic units h=m=1 
 V = np.zeros_like(X) #placeholder values, remember to set V(X, Y) to 0 for slit
 #CREATE THE BARRIER
 V0 = 1e3 #super high energy for the barrier region, so the wave bounces off the fucker
@@ -47,7 +47,6 @@ slitheight = .25
 barmask = (np.abs(X) < barrier_width/2) #for the points X in the - and + direction that are in the bars interval
 slitmask = (np.abs(Y - 1.0) < slitheight) | (np.abs(Y + 1.0) < slitheight) #in the range +-1 for Y's, where the Y < then the height
 V[barmask & ~slitmask] = V0 #set the barrier 
-fullvprop = np.exp(-1j * V * dt)
 
 #Pulse params
 dt_vec = np.arange(Nt)*dt
@@ -60,7 +59,6 @@ drivefield = barmask & ~slitmask
 drive = control_amp*envelope*np.sin(control_freq* dt_vec + controlph)
 control_shape = X * drivefield
 
-drivepos = np.maximum(drive, 0.0)
 
 #Time stepping
 start = time.time()
@@ -72,8 +70,8 @@ for n in range(Nt): #loop all steps
     psi = ifft2(psi_hat)
 
     #potential for the full step
-    Vpulsed = V.copy()
-    Vpulsed[drivefield] = V[drivefield] - drivepos[n]
+    Vinter = -control_shape * drive[n]
+    Vpulsed = V + Vinter
     #psi *= fullvprop
     psi *= np.exp(-1j * Vpulsed * dt)
 
@@ -87,6 +85,12 @@ for n in range(Nt): #loop all steps
         intensity = np.abs(psi)**2
         norm = intensity / intensity.max()
         frames.append((plt.cm.inferno(norm)[:,:,:3] * 255).astype(np.uint8))
+
+#Calculate transmission score
+intensity = np.abs(psi)**2
+right = X > 0.0
+transprob = np.sum(intensity[right]) * dx * dy
+print(f"Transmission probability at final time: {transprob:.4f}")
 end = time.time()
 print(f"Simulation duration {end - start:.2f} s")
 from imageio import mimsave

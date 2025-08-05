@@ -1,4 +1,4 @@
-name: superballs-env
+name: balls-env
 channels:
   - defaults
   - conda-forge
@@ -8,13 +8,14 @@ dependencies:
   - python=3.10
   - pip
   - numpy
-  - pandas
   - matplotlib
   - pytorch
   - pytorch-cuda=11.8
   - imageio 
+  - cma
   - pip:
     - jax
     - jaxlib
     - torch-geometric
     - stable-baselines3
+    - -e . #install my library

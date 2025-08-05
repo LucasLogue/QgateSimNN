@@ -1,5 +1,12 @@
 superballs-env/
+balls-env/
 
+*.egg
+*.egg-info/
+build/
+dist/
+
+outcmaes/
 
 __pycache__/
 *.pyc

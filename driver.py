@@ -8,21 +8,30 @@ import qdotlib
 
 # --- High-Level Experiment Configuration ---
 # You can change these settings to run different experiments.
-ISBREV = True
+ISBREV = False
+ELECCONFIG = "DISORDERED"
 
 GATE_TO_OPTIMIZE = "HADAMARD"  # Can be "NOT" or "HADAMARD"
-POTENTIAL_CONFIG = {'name': 'ideal', 'params': {'omega': 1.0}}
+if ELECCONFIG == "ideal":
+    POTENTIAL_CONFIG = {'name': 'ideal', 'params': {'omega': 1.0}}
+elif ELECCONFIG == "DISORDERED":
+    POTENTIAL_CONFIG = {
+        'name':   'disordered',
+        'params': {
+            'omega':      1.0,
+            'noise_amp':  0.1,
+            'corr_len':   10
+        }
+    }
 
 if ISBREV:
     print("--- RUNNING IN HIGH-PERFORMANCE (BREV) MODE ---")
     GRID_SIZE = 96  # Larger grid for more spatial accuracy
-    DTYPE = torch.complex128 # Use double precision for higher numerical accuracy
     MAX_ITER = 200  # Run the optimizer for more generations
     POP_SIZE = 30   # Test a larger population in each generation
 else:
     print("--- RUNNING IN FAST-PREVIEW (LOCAL) MODE ---")
     GRID_SIZE = 64
-    DTYPE = torch.complex64 # Single precision is faster for testing
     MAX_ITER = 20
     POP_SIZE = 5
 
@@ -48,13 +57,19 @@ def objective_function(params):
     Nt = TIME_STEPS
     X, Y, Z, dx, dy, dz, V, halfkprop, K2 = qdotlib.init_domain(
         Nx=GRID_SIZE, Ny=GRID_SIZE, Nz=GRID_SIZE, dt=DT,
-        potential_cfg=POTENTIAL_CONFIG, dtype=DTYPE
+        potential_cfg=POTENTIAL_CONFIG 
     )
 
     # --- Get the initial and target states from our gate library ---
+    volume = dy*dx*dz
     omega = POTENTIAL_CONFIG['params'].get('omega', 1.0)
-    initial_psi = qdotlib.get_ground(X, Y, Z, omega, dtype=DTYPE)
-    target_psi = qdotlib.target_gate_function(GATE_TO_OPTIMIZE, X, Y, Z, omega, dtype=DTYPE)
+    initial_psi = qdotlib.get_ground(X, Y, Z, omega, volume)
+    target_psi = qdotlib.target_gate_function(GATE_TO_OPTIMIZE, X, Y, Z, omega, volume)
+
+    fid_self   = qdotlib.calc_fidelity(initial_psi, initial_psi, volume)
+    assert abs(fid_self - 1.0) < 1e-6
+    fid_target = qdotlib.calc_fidelity(initial_psi, target_psi, volume)
+    print(f"[DEBUG] ⟨ψ₀|ψ₀⟩ = {fid_self:.6f}, ⟨ψ₀|ψ_target⟩ = {fid_target:.6f}")
 
     # --- Create the control pulse ---
     dt_vec = np.arange(Nt) * dt
@@ -66,7 +81,7 @@ def objective_function(params):
     final_psi = qdotlib.run_sim(initial_psi, V, halfkprop, K2, dt, Nt, drive_pulse, control_shape)
 
     # --- Calculate the final reward using fidelity ---
-    final_fidelity = qdotlib.calc_fidelity(final_psi, target_psi, dx, dy, dz)
+    final_fidelity = qdotlib.calc_fidelity(final_psi, target_psi, volume)
     print(f"  > Resulting Fidelity: {final_fidelity:.6f}\n")
 
     infidelity = 1.0 - final_fidelity + 1e-12 #add 1e-12 to prevent log(0)

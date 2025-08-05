@@ -10,3 +10,4 @@ Requires-Dist: torch
 Requires-Dist: matplotlib
 Requires-Dist: imageio
 Requires-Dist: cma
+Requires-Dist: scipy

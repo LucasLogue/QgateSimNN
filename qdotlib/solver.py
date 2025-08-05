@@ -6,7 +6,7 @@ from .qdotconfig import get_potential
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"--- 3D Split-Step Solver using device: {device} ---")
 
-def init_domain(Nx=64, Ny=64, Nz=64, Lx=10.0, Ly=10.0, Lz=10.0, dt=0.005, potential_cfg={}, dtype=torch.complex64):
+def init_domain(Nx=64, Ny=64, Nz=64, Lx=10.0, Ly=10.0, Lz=10.0, dt=0.005, potential_cfg={}):
     """
     Initializes the simulation grid and potential V
     """
@@ -34,13 +34,13 @@ def init_domain(Nx=64, Ny=64, Nz=64, Lx=10.0, Ly=10.0, Lz=10.0, dt=0.005, potent
     K2 = torch.from_numpy(KX_np**2 + KY_np**2 + KZ_np**2).to(device)
 
 
-    halfkprop = torch.exp(-0.5j * K2 * dt).to(dtype)
+    halfkprop = torch.exp(-0.5j * K2 * dt)
 
     cfgname = potential_cfg.get('name', 'ideal')
     params = potential_cfg.get('params', {})
     V = get_potential(cfgname=cfgname, X=X, Y=Y, Z=Z, params=params)
 
-    return X, Y, Z, dx, dy, dz, V.to(dtype), halfkprop, K2
+    return X, Y, Z, dx, dy, dz, V.to(torch.complex64), halfkprop, K2
 
 def run_sim(initial_psi, V, halfkprop, K2, dt, Nt, drive_pulse, control_shape):
     """
@@ -54,7 +54,7 @@ def run_sim(initial_psi, V, halfkprop, K2, dt, Nt, drive_pulse, control_shape):
         psi = torch.fft.ifftn(psi_hat) # Inverse 3D FFT
         # Potential full-step
         V_interaction = -control_shape * drive_pulse[n]
-        V_pulsed = V + V_interaction.to(psi.dtype)
+        V_pulsed = V + V_interaction
         psi *= torch.exp(-1j * V_pulsed * dt)
 
         # Kinetic half-step again

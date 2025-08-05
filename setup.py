@@ -13,7 +13,8 @@ setup(
         "torch",
         "matplotlib",
         "imageio",
-        "cma"
+        "cma",
+        "scipy"
     ],
     python_requires='>=3.8',
 )

@@ -3,3 +3,4 @@ torch
 matplotlib
 imageio
 cma
+scipy

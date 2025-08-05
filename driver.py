@@ -8,9 +8,14 @@ import matplotlib.pyplot as plt
 # Import our installed quantum dot library
 import qdotlib
 
-# --- High-Level Experiment Configuration ---
-# You can change these settings to run different experiments.
-ISBREV = False
+#TORCH CUDA SANITY CHECK
+
+print("cuda available:", torch.cuda.is_available())
+if torch.cuda.is_available():
+    print("cuda devices:", torch.cuda.device_count(),
+          torch.cuda.get_device_name(0))
+#EXPERIMENT CONFIG PARAMS
+ISBREV = True
 ELECCONFIG = "DISORDERED"
 
 GATE_TO_OPTIMIZE = "HADAMARD"  # Can be "NOT" or "HADAMARD"
@@ -29,12 +34,12 @@ elif ELECCONFIG == "DISORDERED":
 if ISBREV:
     print("--- RUNNING IN HIGH-PERFORMANCE (BREV) MODE ---")
     GRID_SIZE = 96  # Larger grid for more spatial accuracy
-    MAX_ITER = 200  # Run the optimizer for more generations
-    POP_SIZE = 30   # Test a larger population in each generation
+    MAX_ITER = 80  # jesus christ 200 x 30 was going to take 80 mins fuck my asshole
+    POP_SIZE = 12   # 
 else:
     print("--- RUNNING IN FAST-PREVIEW (LOCAL) MODE ---")
     GRID_SIZE = 64
-    MAX_ITER = 20
+    MAX_ITER = 20 #suprisingly chill for local system
     POP_SIZE = 5
 
 

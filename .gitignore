@@ -2,6 +2,7 @@ superballs-env/
 balls-env/
 
 *.egg
+*.egg*
 *.egg-info/
 build/
 dist/

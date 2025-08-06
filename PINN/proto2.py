@@ -73,13 +73,24 @@ class SchrodingerPINN(nn.Module):
 
     def forward(self, x, t):
         input_tensor = torch.cat([x, t], dim=-1)
+        normalized = 2 * (input_tensor - self.lower_bound) / (self.upper_bound - self.lower_bound) - 1
+        raw = self.net(normalized)
+        bigO = torch.complex(raw[..., 0], raw[..., 1])
+        ansata = 1.0 - t/T_MAX
+        ansatb = t/T_MAX
 
-        normalized_input = 2.0 * (input_tensor - self.lower_bound) / (self.upper_bound - self.lower_bound) - 1.0
-        raw_output = self.net(normalized_input)
-        betterout = torch.complex(raw_output[..., 0], raw_output[..., 1])
-        time_factor = (1.0 - torch.exp(-0.1*t))
-        psi = initial_state(x) + time_factor * betterout
-        return psi #added ANSATZ
+        env = (x - X_MIN) * (X_MAX - x)
+
+        psi0 = initial_state(x)
+        psi = ansata * psi0 + ansatb*env*bigO
+        return psi
+        #broken but produces something
+        # normalized_input = 2.0 * (input_tensor - self.lower_bound) / (self.upper_bound - self.lower_bound) - 1.0
+        # raw_output = self.net(normalized_input)
+        # betterout = torch.complex(raw_output[..., 0], raw_output[..., 1])
+        # time_factor = (1.0 - torch.exp(-0.1*t))
+        # psi = initial_state(x) + time_factor * betterout
+        # return psi #added ANSATZ
 
 def residual(net, x, t):
     x.requires_grad_(True)
@@ -107,16 +118,19 @@ def residual(net, x, t):
     v_xx = grad(v_x.sum(), x, create_graph=True)[0]
 
     # Reconstruct the complex derivatives
-    psi_t = u_t + 1j * v_t
-    psi_xx = u_xx + 1j * v_xx
+    psi_t = torch.complex(u_t,  v_t)
+    psi_xx = torch.complex(u_xx, v_xx)
+
     # --- END FIX ---
 
     # Now, calculate the PDE residual as before
+    i = torch.complex(torch.tensor(0., device=x.device),
+                  torch.tensor(1., device=x.device))
     V = harmonic_potential(x)
     E_t = control_pulse(t)
     H_psi = -0.5 * psi_xx + (V - E_t * x) * psi
     
-    pde_residual = 1j * psi_t - H_psi
+    pde_residual = i * psi_t - H_psi
     return torch.mean(pde_residual.real**2 + pde_residual.imag**2)
 
 # ---------------- Samplers -------------------------
@@ -166,7 +180,7 @@ def save_comparison_plot(net, epoch_number):
     plt.title(f"Comparison at Epoch {epoch_number}")
     plt.xlabel("Position (x)")
     plt.ylabel("Probability Density |ψ|²")
-    plt.legend()
+    #plt.legend()
     plt.grid(True, linestyle='--', alpha=0.6)
     plt.xlim(X_MIN, X_MAX)
     plt.ylim(bottom=-0.05, top=max(0.6, np.max(pinn_density)*1.1)) # Adjust ylim dynamically
@@ -181,51 +195,49 @@ def save_comparison_plot(net, epoch_number):
 
 # ---------------- Training -------------------------
 if __name__ == "__main__":
+    # Use a modest learning rate and more epochs to allow for stable convergence.
+
     net = SchrodingerPINN().to(device)
     opt = torch.optim.Adam(net.parameters(), lr=LR)
-    scheduler = ExponentialLR(opt, gamma=0.998)
+    # We won't use a scheduler; a fixed small LR is more stable for this problem.
 
     start = time.time()
     for ep in range(1, EPOCHS+1):
         opt.zero_grad()
 
-        # --- NEW: Simplified Loss and Weights ---
-        # Since the IC is now guaranteed, we can remove L_ic from the loss.
-        # This simplifies the training process significantly.
-        w_pde = 1.0
-        w_bc = 0.5
-        w_norm = 0.5
+        # --- FINAL FIX: Use simple, strong, STATIC loss weights ---
+        # This prevents the "shock" of changing weights and constantly enforces
+        # the physical constraints, as recommended by the reference materials.
+        w_pde = 1.0   # The physics is our baseline
+        w_bc = 10.0   # Heavily penalize boundary violations
+        w_norm = 10.0 # Heavily penalize normalization violations
         
-        # --- PDE Loss ---
+        # --- Loss calculations are the same ---
         xc, tc = collocation(N_COL)
         L_pde = residual(net, xc, tc)
 
-        # --- Boundary Condition Loss ---
         xb_left, xb_right, tb = bc_batch(N_BC)
         psi_bc_left = net(xb_left, tb)
         psi_bc_right = net(xb_right, tb)
         L_bc = torch.mean(psi_bc_left.abs()**2) + torch.mean(psi_bc_right.abs()**2)
 
-        # --- Normalization Loss ---
         xn, tn = collocation(N_IC)
         psi_norm = net(xn, tn)
         prob_density_integral = torch.mean(psi_norm.abs()**2) * (X_MAX - X_MIN)
         L_norm = (prob_density_integral - 1.0)**2
 
-        # The L_ic loss is no longer needed.
         total_loss = w_pde * L_pde + w_bc * L_bc + w_norm * L_norm
         
         total_loss.backward()
         opt.step()
         
-        if ep % 500 == 0 and scheduler.get_last_lr()[0] > 1e-5:
-            scheduler.step()
-
+        # --- Simplified Diagnostics ---
         if ep % PRINT_EVERY == 0 or ep == 1:
             print("-" * 60)
             print(f"Epoch {ep:>5} | Total Loss: {total_loss.item():.2e} | LR: {opt.param_groups[0]['lr']:.1e}")
             print(f"  L_pde: {L_pde.item():.2e} | L_bc: {L_bc.item():.2e} | L_norm: {L_norm.item():.2e}")
 
+        # Save a plot midway to check progress
         if ep == EPOCHS // 2:
             save_comparison_plot(net, ep)
 
@@ -236,6 +248,7 @@ if __name__ == "__main__":
     torch.save(net.state_dict(), "pinn1d_tdse_pulse.pt")
     print("✅  Training finished – pinn1d_tdse_pulse.pt saved")
 
+    # Save the final plot
     save_comparison_plot(net, EPOCHS)
 
     # #=====================GRAPH COMPARISON

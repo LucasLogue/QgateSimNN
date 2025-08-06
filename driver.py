@@ -15,7 +15,7 @@ if torch.cuda.is_available():
           torch.cuda.get_device_name(0))
 #EXPERIMENT CONFIG PARAMS
 ISBREV = False
-ELECCONFIG = "DISORDERED"
+ELECCONFIG = "ideal"
 
 GATE_TO_OPTIMIZE = "HADAMARD"  # Can be "NOT" or "HADAMARD"
 if ELECCONFIG == "ideal":
@@ -38,17 +38,17 @@ if ISBREV:
 else:
     print("--- RUNNING IN FAST-PREVIEW (LOCAL) MODE ---")
     GRID_SIZE = 64
-    MAX_ITER = 10 #suprisingly chill for local system
-    POP_SIZE = 5
+    MAX_ITER = 20 #suprisingly chill for local system
+    POP_SIZE = 10
 
 #Variables and Project Initialization
 _snapshot_done = False
 
+domain = {}
 TIME_STEPS = 500 # Number of time steps in the simulation
 DT = 0.005 # Time step duration
-
+domain["t"] = torch.arange(TIME_STEPS, device="cuda") * DT
 #Chosen Domain
-domain = {}
 (X, Y, Z, dx, dy, dz, V, halfkprop, K2) = qdotlib.init_domain(
         Nx=GRID_SIZE, Ny=GRID_SIZE, Nz=GRID_SIZE, dt=DT,
         potential_cfg=POTENTIAL_CONFIG 
@@ -79,14 +79,6 @@ def objective_function(params, *, st=domain):
 
     print(f"--- Testing: A={control_amp:.1f}, F={control_freq:.2f}, "
           f"T={pulse_center_t:.2f}, W={pulse_width:.2f} ---")
-    
-    # #in theory could be done once
-    # dt = 0.005
-    Nt = TIME_STEPS
-    # X, Y, Z, dx, dy, dz, V, halfkprop, K2 = qdotlib.init_domain(
-    #     Nx=GRID_SIZE, Ny=GRID_SIZE, Nz=GRID_SIZE, dt=DT,
-    #     potential_cfg=POTENTIAL_CONFIG 
-    # )
 
     #Save the electron configuration potential graph to output folder, only once per loop
     if not _snapshot_done:
@@ -117,28 +109,20 @@ def objective_function(params, *, st=domain):
         fig.savefig(filename, dpi=300)
         plt.close(fig)
 
-
-
-    # #!!!!!!!!!could be optimized
-    # volume = dy*dx*dz
-    # omega = POTENTIAL_CONFIG['params'].get('omega', 1.0)
-    # initial_psi = qdotlib.get_ground(X, Y, Z, omega, volume)
-    # target_psi = qdotlib.target_gate_function(GATE_TO_OPTIMIZE, X, Y, Z, omega, volume)
-
     #Commented out this debug statement for efficiency
     # fid_self   = qdotlib.calc_fidelity(initial_psi, initial_psi, volume)
     # assert abs(fid_self - 1.0) < 1e-6
     # fid_target = qdotlib.calc_fidelity(initial_psi, target_psi, volume)
     # print(f"[DEBUG] ⟨ψ₀|ψ₀⟩ = {fid_self:.6f}, ⟨ψ₀|ψ_target⟩ = {fid_target:.6f}")
 
-    #Control Pulse, Needs to be Remade every loop, so fine
-    dt_vec = np.arange(Nt) * DT
-    envelope = np.exp(-((dt_vec - pulse_center_t) / pulse_width)**2)
-    drive_pulse = control_amp * envelope * np.sin(control_freq * dt_vec + control_phase)
+    #Control Pulse, working on optimization
+    dt_vec = st["t"]
+    envelope = torch.exp(-((dt_vec - pulse_center_t) / pulse_width)**2)
+    drive_pulse = control_amp * envelope * torch.sin(control_freq * dt_vec + control_phase)
     control_shape = st["X"]  # Simple dipole interaction in the x-direction
 
     #Simulation call, needs to be done in every loop
-    final_psi = qdotlib.run_sim(st["initial_psi"], st["V"], st["halfk"], st["K2"], DT, Nt, drive_pulse, control_shape)
+    final_psi = qdotlib.RUN_SIM(st["initial_psi"], st["V"], st["halfk"], st["K2"], DT, TIME_STEPS, drive_pulse, control_shape)
 
     #final score, needs to be done every loop
     final_fidelity = qdotlib.calc_fidelity(final_psi, st["target_psi"], st["volume"])

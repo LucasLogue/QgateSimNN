@@ -42,7 +42,20 @@ def init_domain(Nx=64, Ny=64, Nz=64, Lx=10.0, Ly=10.0, Lz=10.0, dt=0.005, potent
 
     return X, Y, Z, dx, dy, dz, V.to(torch.complex64), halfkprop, K2
 
-def run_sim(initial_psi, V, halfkprop, K2, dt, Nt, drive_pulse, control_shape):
+#Normal run_sim definition
+#def run_sim(initial_psi, V, halfkprop, K2, dt, Nt, drive_pulse, control_shape):
+
+#jit run_sim def
+def run_sim(
+    initial_psi: torch.Tensor,
+    V: torch.Tensor,
+    halfkprop: torch.Tensor,
+    K2: torch.Tensor,
+    dt: float,
+    Nt: int,
+    drive_pulse: torch.Tensor,
+    control_shape: torch.Tensor
+) -> torch.Tensor:
     """
     Runs the 3D time-evolution simulation
     """
@@ -63,3 +76,12 @@ def run_sim(initial_psi, V, halfkprop, K2, dt, Nt, drive_pulse, control_shape):
         psi = torch.fft.ifftn(psi_hat)
         
     return psi
+
+#This should be fine
+try:
+    run_sim_ts = torch.jit.script(run_sim)
+    RUN_SIM = run_sim_ts
+    print("TorchScripted the Simulation")
+except Exception as e:
+    print("TorchScript failed, falling back → eager mode:", e)
+    RUN_SIM = run_sim

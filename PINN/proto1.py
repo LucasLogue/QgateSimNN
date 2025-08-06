@@ -89,7 +89,7 @@ class SchrodingerPINN(nn.Module):
         #now using a neural network switch and aVOids vanishing gradient
         tenvelope = (1.0 - torch.exp(-self.timefactor * t))
         boundary_term = (x - X_MIN) * (X_MAX - x)
-        return tenvelope * boundary_term * psi_nn.unsqueeze(1) + self.initial_state(x)
+        return tenvelope * boundary_term * psi_nn + self.initial_state(x)
 
        # boundary_term = self.boundary_factor * (x - X_MIN) * (X_MAX - x)
 

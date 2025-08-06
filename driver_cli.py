@@ -17,7 +17,7 @@ if torch.cuda.is_available():
 ISBREV = False
 ELECCONFIG = "doublewell" #can be ideal, disordered, doublewell
 
-GATE_TO_OPTIMIZE = "BELL"  # Can be "NOT" or "HADAMARD", "CNOT", "OR BELL STATE"
+GATE_TO_OPTIMIZE = "HADAMARD"  # Can be "NOT" or "HADAMARD", "CNOT"
 if ELECCONFIG == "ideal":
     POTENTIAL_CONFIG = {'name': 'ideal', 'params': {'omega': 1.0}}
 elif ELECCONFIG == "disordered":
@@ -30,7 +30,7 @@ elif ELECCONFIG == "disordered":
         }
     }
 elif ELECCONFIG == "doublewell":
-    if GATE_TO_OPTIMIZE in ("CNOT", "BELL"):
+    if GATE_TO_OPTIMIZE == "CNOT":
         POTENTIAL_CONFIG = {
             "name": "doublewell", "params":
             {"omega": 1.0,

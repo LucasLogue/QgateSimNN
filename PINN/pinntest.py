@@ -15,20 +15,43 @@ from proto1 import control_pulse as ctrl_orig
 def control_pulse(t):
     return 0.0 * t
 # 2)  re-create the exact network architecture
-class SchrodingerPINN(torch.nn.Module):
-    def __init__(self, hidden_layers=8, hidden_units=256):
+class AdaptiveTanh(torch.nn.Module):
+    def __init__(self, initial_a=1.0):
         super().__init__()
-        layers, in_dim = [], 2                         # (x, t)
-        for _ in range(hidden_layers):
-            layers += [torch.nn.Linear(in_dim, hidden_units), torch.nn.Tanh()]
-            in_dim = hidden_units
-        layers.append(torch.nn.Linear(in_dim, 2))      # Re, Im
-        self.net = torch.nn.Sequential(*layers)
+        self.a = torch.nn.Parameter(torch.tensor(initial_a))
+
+    def forward(self, x):
+        return self.a * torch.tanh(x)
+
+# 2) Re-create the main PINN class with the hard-constraint forward pass
+class SchrodingerPINN(torch.nn.Module):
+    def __init__(self, layers=8, units=384): # Must match training parameters
+        super().__init__()
+        net, in_dim = [], 2
+        for _ in range(layers):
+            net += [torch.nn.Linear(in_dim, units), AdaptiveTanh()] # Use the adaptive activation
+            in_dim = units
+        net.append(torch.nn.Linear(in_dim, 2))
+        self.net = torch.nn.Sequential(*net)
+        
+        # Define constants needed for the forward pass
+        self.time_factor = 5.0
+        self.X_MIN, self.X_MAX = -5.0, 5.0
+        self.OMEGA = 1.0
+
+    def initial_state(self, x):
+        coeff = (self.OMEGA / torch.pi) ** 0.25
+        real_part = coeff * torch.exp(-0.5 * self.OMEGA * x ** 2)
+        return torch.complex(real_part, torch.zeros_like(real_part))
 
     def forward(self, x, t):
-        y = self.net(torch.cat([x, t], dim=-1))
-        return torch.complex(y[..., 0], y[..., 1])
+        ψ_nn = self.net(torch.cat([x, t], dim=-1))
+        ψ_nn = torch.complex(ψ_nn[..., 0], ψ_nn[..., 1])
 
+        time_envelope = (1.0 - torch.exp(-self.time_factor * t))
+        boundary_term = (x - self.X_MIN) * (self.X_MAX - x)
+        
+        return time_envelope * boundary_term * ψ_nn + self.initial_state(x)
 net = SchrodingerPINN()
 net.load_state_dict(torch.load(model_path, map_location="cpu"))
 net.eval()

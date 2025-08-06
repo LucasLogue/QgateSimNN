@@ -17,7 +17,7 @@ if torch.cuda.is_available():
 ISBREV = False
 ELECCONFIG = "doublewell" #can be ideal, disordered, doublewell
 
-GATE_TO_OPTIMIZE = "HADAMARD"  # Can be "NOT" or "HADAMARD"
+GATE_TO_OPTIMIZE = "HADAMARD"  # Can be "NOT" or "HADAMARD", "CNOT"
 if ELECCONFIG == "ideal":
     POTENTIAL_CONFIG = {'name': 'ideal', 'params': {'omega': 1.0}}
 elif ELECCONFIG == "disordered":
@@ -30,13 +30,22 @@ elif ELECCONFIG == "disordered":
         }
     }
 elif ELECCONFIG == "doublewell":
-    potential_cfg={"name": "doublewell", "params": {"omega": 1.0, "delta": 2.0}}
+    if GATE_TO_OPTIMIZE == "CNOT":
+        POTENTIAL_CONFIG = {
+            "name": "doublewell", "params":
+            {"omega": 1.0,
+            "delta": 2.0,
+            #"vol":   domain["volume"],   # always include the voxel volume
+            "input_state": "10"}          # optional; defaults to '10'
+        }
+    else:
+        POTENTIAL_CONFIG={"name": "doublewell", "params": {"omega": 1.0, "delta": 2.0}}
 
 if ISBREV:
     print("--- RUNNING IN HIGH-PERFORMANCE (BREV) MODE ---")
     GRID_SIZE = 96  # Larger grid for more spatial accuracy
-    MAX_ITER = 80  # jesus christ 200 x 30 was going to take 80 mins fuck my asshole
-    POP_SIZE = 12   # 
+    MAX_ITER = 40  # jesus christ 200 x 30 was going to take 80 mins fuck my asshole
+    POP_SIZE = 15   # 
 else:
     print("--- RUNNING IN FAST-PREVIEW (LOCAL) MODE ---")
     GRID_SIZE = 64
@@ -47,21 +56,27 @@ else:
 _snapshot_done = False
 
 domain = {}
+params_target = POTENTIAL_CONFIG.get('params', {}).copy()
 TIME_STEPS = 500 # Number of time steps in the simulation
 DT = 0.005 # Time step duration
 domain["t"] = torch.arange(TIME_STEPS, device="cuda") * DT
 #Chosen Domain
+params_init = POTENTIAL_CONFIG.get('params', {}).copy()
 (X, Y, Z, dx, dy, dz, V, halfkprop, K2) = qdotlib.init_domain(
         Nx=GRID_SIZE, Ny=GRID_SIZE, Nz=GRID_SIZE, dt=DT,
-        potential_cfg=POTENTIAL_CONFIG 
+        potential_cfg=params_init 
     )
 
 domain["volume"] = dx * dy * dz
+params_target['vol'] = domain['volume']
 omega = POTENTIAL_CONFIG['params'].get('omega', 1.0)
 
 
 domain["initial_psi"] = qdotlib.get_ground(X, Y, Z, omega, domain["volume"])
-domain["target_psi"] = qdotlib.target_gate_function(GATE_TO_OPTIMIZE, X, Y, Z, omega, domain["volume"])
+
+#change for double well testing
+# domain["target_psi"] = qdotlib.target_gate_function(GATE_TO_OPTIMIZE, X, Y, Z, omega, domain["volume"])
+domain["target_psi"] = qdotlib.target_gate_function(GATE_TO_OPTIMIZE, X, Y, Z, params=params_target)
 
 domain["X"] = X
 domain["V"] = V
@@ -111,11 +126,6 @@ def objective_function(params, *, st=domain):
         fig.savefig(filename, dpi=300)
         plt.close(fig)
 
-    #Commented out this debug statement for efficiency
-    # fid_self   = qdotlib.calc_fidelity(initial_psi, initial_psi, volume)
-    # assert abs(fid_self - 1.0) < 1e-6
-    # fid_target = qdotlib.calc_fidelity(initial_psi, target_psi, volume)
-    # print(f"[DEBUG] ⟨ψ₀|ψ₀⟩ = {fid_self:.6f}, ⟨ψ₀|ψ_target⟩ = {fid_target:.6f}")
 
     #Control Pulse, working on optimization
     dt_vec = st["t"]
@@ -158,6 +168,20 @@ if __name__ == '__main__':
         'popsize': POP_SIZE,
         'CMA_stds': std_devs_param # Correct way to specify per-parameter stds
     }
+
+    #SANITY
+    fid_self  = qdotlib.calc_fidelity(domain["initial_psi"],
+                                  domain["initial_psi"],
+                                  domain["volume"])
+    fid_xt    = qdotlib.calc_fidelity(domain["target_psi"],
+                                  domain["target_psi"],
+                                  domain["volume"])
+    fid_0T    = qdotlib.calc_fidelity(domain["initial_psi"],
+                                  domain["target_psi"],
+                                  domain["volume"])
+    print("⟨ψ₀|ψ₀⟩ =", fid_self,
+      "  ⟨ψ_tgt|ψ_tgt⟩ =", fid_xt,
+      "  ⟨ψ₀|ψ_tgt⟩² =", fid_0T)
     # Run the CMA-ES optimizer
     best_params, es = cma.fmin2(objective_function,
                                initial_guess,

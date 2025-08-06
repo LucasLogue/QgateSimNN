@@ -53,19 +53,49 @@ def initial_state(x):
 
 # ---------------- Network --------------------------
 
+class AdaptiveTanh(nn.Module):
+    def __init__(self, initial_a=1.0):
+        super().__init__()
+        # Create a learnable parameter 'a' for the slope of the activation
+        self.a = nn.Parameter(torch.tensor(initial_a))
+
+
+    def forward(self, x):
+        # The activation is now a * tanh(x)
+        return self.a * torch.tanh(x)
+
 class SchrodingerPINN(nn.Module):
     def __init__(self, layers=8, units=256):
         super().__init__()
         net, in_dim = [], 2
         for _ in range(layers):
-            net += [nn.Linear(in_dim, units), nn.Tanh()]
+            net += [nn.Linear(in_dim, units), AdaptiveTanh()]
             in_dim = units
         net.append(nn.Linear(in_dim, 2))
         self.net = nn.Sequential(*net)
+        #self.boundary_factor = 0.1
+        self.timefactor = 5.0
 
+    #INITIALSTATE!
+    def initial_state(self, x):
+        coeff = (OMEGA / torch.pi) ** 0.25
+        real_part = coeff * torch.exp(-0.5 * OMEGA * x ** 2)
+        return torch.complex(real_part, torch.zeros_like(real_part))
+    #Updated forward with boundaries
     def forward(self, x, t):
-        y = self.net(torch.cat([x, t], dim=-1))
-        return torch.complex(y[..., 0], y[..., 1])
+        psi_nn_raw = self.net(torch.cat([x, t], dim=-1))
+        psi_nn = torch.complex(psi_nn_raw[..., 0], psi_nn_raw[..., 1])
+
+        #now using a neural network switch and aVOids vanishing gradient
+        tenvelope = (1.0 - torch.exp(-self.timefactor * t))
+        boundary_term = (x - X_MIN) * (X_MAX - x)
+        return tenvelope * boundary_term * psi_nn.unsqueeze(1) + self.initial_state(x)
+
+       # boundary_term = self.boundary_factor * (x - X_MIN) * (X_MAX - x)
+
+        #return boundary_term * t * psi_nn + initial_state(x)
+        # y = self.net(torch.cat([x, t], dim=-1))
+        # return torch.complex(y[..., 0], y[..., 1])
 
 # ---------------- Loss helpers ---------------------
 def hamiltonian(net, x, t):
@@ -167,20 +197,20 @@ if __name__ == "__main__":
         xc, tc = collocation(N_COL)
         L_pde = residual(net, xc, tc)
 
-        xi, ti, psi0 = ic_batch(N_IC)
-        psi_ic = net(xi, ti)
-        L_ic = ((psi_ic - psi0).abs()**2).mean()
+        # xi, ti, psi0 = ic_batch(N_IC)
+        # psi_ic = net(xi, ti)
+        # L_ic = ((psi_ic - psi0).abs()**2).mean()
 
-        xb, tb = bc_batch(N_BC)
-        psi_bc = net(xb, tb)
-        L_bc = (psi_bc.abs()**2).mean()
+        # xb, tb = bc_batch(N_BC)
+        # psi_bc = net(xb, tb)
+        # L_bc = (psi_bc.abs()**2).mean()
 
         xn, tn = collocation(N_IC)
         L_norm = norm_loss(net(xn, tn))
 
-        L_energy = energy_conservation_loss(net, N_ENERGY)
+        #L_energy = energy_conservation_loss(net, N_ENERGY)
 
-        total = w_pde*L_pde + w_ic*L_ic + w_bc*L_bc + w_norm*L_norm + w_energy*L_energy
+        total = w_pde*L_pde + w_norm*L_norm #+ w_energy*L_energy
 
         total.backward()
         opt.step()
@@ -190,8 +220,8 @@ if __name__ == "__main__":
 
         if ep % PRINT_EVERY == 0:
             print(f"Ep {ep:>5} | L {total.item():.2e} | "
-                  f"PDE {L_pde.item():.1e} IC {L_ic.item():.1e} "
-                  f"BC {L_bc.item():.1e} N {L_norm.item():.1e} | "
+                #   f"PDE {L_pde.item():.1e} IC {L_ic.item():.1e} "
+                #   f"BC {L_bc.item():.1e} N {L_norm.item():.1e} | "
                   f"LR {scheduler.get_last_lr()[0]:.1e}")
     end = time.time()
     dur = end - start

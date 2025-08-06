@@ -34,29 +34,61 @@ def dw_qbit_wave(X, Y, Z, bit, omega=1.0, delta=2.0, vol=1.0) -> torch.Tensor:
     norm   = torch.sqrt(torch.sum(torch.abs(psi) ** 2) * vol)
     return psi / norm
 
-def dw_twoqbit_basis(X, Y, Z, bit, omega=1.0, delta=2.0, vol=1.0):
-    psi0 = get_qubit_wave(X, Y, Z, bit=0, omega=omega, delta=delta, vol=vol)
-    psi1 = get_qubit_wave(X, Y, Z, bit=1, omega=omega, delta=delta, vol=vol)
+def dw_twoqbit_basis(X, Y, Z, *, omega=1.0, delta=2.0, vol=1.0):
+    psi0 = dw_qbit_wave(X, Y, Z, bit=0, omega=omega, delta=delta, vol=vol) #left
+    psi1 = dw_qbit_wave(X, Y, Z, bit=1, omega=omega, delta=delta, vol=vol) #right
+    def normem(psi):
+        return psi / torch.sqrt(torch.sum(torch.abs(psi)**2) * vol)
     basis = {
         "00": psi0 * psi0,
         "01": psi0 * psi1,
         "10": psi1 * psi0,
         "11": psi1 * psi1,
     }
-    return basis
+    return {
+        "00": normem(psi0 * psi0),
+        "01": normem(psi0 * psi1),
+        "10": normem(psi1 * psi0),
+        "11": normem(psi1 * psi1),
+    }
+    #return basis
 
-def target_gate_function(gate, X, Y, Z, omega=1.0, vol=1.0):
+def target_gate_function(gate, X, Y, Z, *, params:dict | None = None):
     """
     Returns the ideal value for selected gate
     """
-    psi_0 = get_ground(X, Y, Z, omega, vol)
-    psi_1 = get_maxexcited(X, Y, Z, omega, vol)
+    cfg   = {'omega': 1.0, 'delta': 2.0, 'vol': 1.0}
+    if params is not None:
+        cfg.update(params)
+    omega = cfg['omega']
+    delta = cfg['delta']
+    vol   = cfg['vol']
+
+
+    # psi_0 = get_ground(X, Y, Z, omega, vol)
+    # psi_1 = get_maxexcited(X, Y, Z, omega, vol)
 
     if gate.upper() == "NOT":
-        return psi_1
+        return get_maxexcited(X, Y, Z, omega, vol)
     elif gate.upper() == "HADAMARD":
-        return (1.0 / np.sqrt(2.0)) * (psi_0 + psi_1)
-    elif gate.upper() == "DOUBLEWELL":
-        #
+        psi_0 = get_ground(X, Y, Z, omega, vol)
+        psi_1 = get_maxexcited(X, Y, Z, omega, vol)
+        # return (1.0 / np.sqrt(2.0)) * (psi_0 + psi_1)
+        return (psi_0 + psi_1) / torch.sqrt(torch.tensor(2.0, device=X.device))
+
+    elif gate.upper() in ("BELL", "PHIPLUS"):
+        basis = dw_twoqbit_basis(X,Y,Z, omega=omega, delta=delta, vol=vol)
+        return (basis["00"] + basis["11"]) / torch.sqrt(torch.tensor(2.0, device=X.device))
+    elif gate.upper() == "CNOT":
+        ctrl  = params.get("input_state", "10")
+        basis = dw_twoqbit_basis(X, Y, Z, omega=omega, delta=delta, vol=vol)
+        mapping = {"00": "00",
+                   "01": "01",
+                   "10": "11",
+                   "11": "10"}
+        if ctrl not in mapping:
+            raise ValueError("CNOT: input_state must be one of '00','01','10','11'")
+
+        return basis[mapping[ctrl]]
     else:
         raise ValueError(f"Unknown gate: {gate}")

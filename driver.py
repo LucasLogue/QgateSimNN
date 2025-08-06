@@ -15,12 +15,12 @@ if torch.cuda.is_available():
           torch.cuda.get_device_name(0))
 #EXPERIMENT CONFIG PARAMS
 ISBREV = False
-ELECCONFIG = "ideal"
+ELECCONFIG = "doublewell" #can be ideal, disordered, doublewell
 
 GATE_TO_OPTIMIZE = "HADAMARD"  # Can be "NOT" or "HADAMARD"
 if ELECCONFIG == "ideal":
     POTENTIAL_CONFIG = {'name': 'ideal', 'params': {'omega': 1.0}}
-elif ELECCONFIG == "DISORDERED":
+elif ELECCONFIG == "disordered":
     POTENTIAL_CONFIG = {
         'name':   'disordered',
         'params': {
@@ -29,6 +29,8 @@ elif ELECCONFIG == "DISORDERED":
             'corr_len':   5
         }
     }
+elif ELECCONFIG == "doublewell":
+    potential_cfg={"name": "doublewell", "params": {"omega": 1.0, "delta": 2.0}}
 
 if ISBREV:
     print("--- RUNNING IN HIGH-PERFORMANCE (BREV) MODE ---")

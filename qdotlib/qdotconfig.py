@@ -19,6 +19,12 @@ def disordered_harmonic_potential(X, Y, Z, omega: float = 1.0, noise_amp: float 
 
     return V0+noise_amp*noise_t
 
+def doublewell_potential(X, Y, Z, omega=1.0, delta=2.0):
+    """
+    Potential field for double well with two electrons 
+    """
+    return 0.5 * omega**2 * ((X-delta)**2) + 0.5 * omega**2 * ((X+delta)**2)
+
 def get_potential(cfgname, X, Y, Z, params={}):
     """
     Returns the potential for selected electron configuration
@@ -33,6 +39,8 @@ def get_potential(cfgname, X, Y, Z, params={}):
         # D = (V_disord- V_ideal).flatten().abs().mean().item()
         # print("SANITY CHECK! ", D)
         return disordered_harmonic_potential(X, Y, Z, **params)
+    elif cfgname == "doublewell":
+        return doublewell_potential(X, Y, Z, **params)
     else:
         raise ValueError("bruh we dont have that")
     

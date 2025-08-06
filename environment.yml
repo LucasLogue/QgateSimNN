@@ -1,24 +1,23 @@
 name: balls-env
 channels:
-  - defaults
-  - conda-forge
   - pytorch
   - nvidia
+  - conda-forge
+  - defaults
 dependencies:
   - python=3.10
   - pip
+
+  #Science stack
   - numpy
   - matplotlib
+  - imageio 
+  - cma
+  - scipy
+#PyTorchstack
   - pytorch
   - torchvision
   - torchaudio
   - pytorch-cuda=11.8
-  - imageio 
-  - cma
-  - scipy
   - pip:
-    - jax
-    - jaxlib
-    - torch-geometric
-    - stable-baselines3
     - -e . #install my library

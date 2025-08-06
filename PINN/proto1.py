@@ -1,166 +1,201 @@
 import torch
 import torch.nn as nn
 from torch.autograd import grad
-#1-D PINN test
+from torch.amp import autocast, GradScaler
+from contextlib import nullcontext
+from torch.optim.lr_scheduler import ExponentialLR
+import time
+"""
+1‑D PINN for the TDSE **with fixed control pulse**
+=================================================
+* Harmonic potential `V(x)=½ ω² x²` plus drive term `‑E(t)x`.
+* Mixed‑precision **forward** pass for speed; derivatives stay FP32 for stability.
+* Works on CUDA 12.+ GPUs without `torch.compile` quirks.
+* Saves to `pinn1d_tdse_pulse.pt`.
+"""
 
-# HYPER PARAMS!
+# ---------------- Runtime constants ----------------
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-DTYPE = torch.float32 #real dtype
+print("Running on", device)
+if device.type != "cuda":
+    raise SystemExit("⚠️  CUDA GPU required")
+
+amp_ctx = autocast("cuda")        # fp16 forward only
+scaler  = GradScaler("cuda")
+
+OMEGA = 1.0
+X_MIN, X_MAX = -5.0, 5.0
+T_MAX = 3.0
+
+PULSE_AMP, PULSE_FREQ, PULSE_PHASE = -6.3, 1.13, 0.64
+PULSE_T0,  PULSE_WIDTH             = 0.0, 1.7
+
+N_IC, N_BC, N_COL, N_ENERGY = 1024, 1024, 2048, 1024
+EPOCHS, LR        = 12_000, 2e-3
+PRINT_EVERY       = 400
 
 
-OMEGA        = 1.0                      # harmonic ω
-X_MIN, X_MAX = -5.0, 5.0               # spatial box
-T_MAX        = 3.0                     # total evolution time
+w_pde, w_ic, w_bc, w_norm = 10.0, 5.0, 5.0, 5.0
 
-N_IC  = 1024                            # points for initial condition loss
-N_BC  = 1024                            # points for boundary loss (x = ±L)
-N_COL = 8192                            # collocation points per batch
+# ---------------- Helper functions -----------------
 
-EPOCHS       = 20000
-LR           = 1e-3
-PRINT_EVERY  = 500
-
-#loss weights, will need to change a lot
-w_pde, w_ic, w_bc, w_norm = 1.0, 10.0, 10.0, 1.0
-
-
-#Helpers
-def harmonic_potential(x: torch.Tensor) -> torch.Tensor:
-    """½ ω² x²"""
+def harmonic_potential(x):
     return 0.5 * (OMEGA ** 2) * x ** 2
 
+def control_pulse(t):
+    env = torch.exp(-((t - PULSE_T0) / PULSE_WIDTH) ** 2)
+    return PULSE_AMP * env * torch.sin(PULSE_FREQ * t + PULSE_PHASE)
 
-def initial_state(x: torch.Tensor) -> torch.Tensor:
-    """Ground state of harmonic oscillator (analytic)"""
-    # ψ₀(x) = (ω/π)^{1/4} exp(-½ ω x²)
+def initial_state(x):
     coeff = (OMEGA / torch.pi) ** 0.25
-    psi0 = coeff * torch.exp(-0.5 * OMEGA * x ** 2)
-    return psi0
+    return coeff * torch.exp(-0.5 * OMEGA * x ** 2)
 
+# ---------------- Network --------------------------
 
-def complex_split_to_tensor(re: torch.Tensor, im: torch.Tensor) -> torch.Tensor:
-    """Combine real/imag parts (…,) → complex tensor."""
-    return torch.complex(re, im)
-
-
-class SchrodingerPINN(nn.module):
-    def __init__(self, hlayers: int = 8, hunits: int = 256):
+class SchrodingerPINN(nn.Module):
+    def __init__(self, layers=8, units=256):
         super().__init__()
-        layers=[]
-        in_dim = 2 #x, t
-
-        #NN layering
-        for i in range(hlayers):
-            out_dim = hunits
-            layers.append(nn.Linear(in_dim), out_dim)
-            layers.append(nn.Tanh())
-            in_dim = out_dim #set dimensions for next loop
-        layers.append(nn.Linear(in_dim,2)) #set final output to 2, RE, IM
-        self.net = nn.Sequential(*layers)
+        net, in_dim = [], 2
+        for _ in range(layers):
+            net += [nn.Linear(in_dim, units), nn.Tanh()]
+            in_dim = units
+        net.append(nn.Linear(in_dim, 2))
+        self.net = nn.Sequential(*net)
 
     def forward(self, x, t):
-        inp = torch.cat([x, t], dim=-1)
-        out = self.net(inp)
-        psi_re, psi_im = out[..., 0], out[..., 1]
-        return psi_re, psi_im
-    
+        y = self.net(torch.cat([x, t], dim=-1))
+        return torch.complex(y[..., 0], y[..., 1])
 
-#LOSS COMPONENETS!!!!!!!!!!!!!!!!!!!!!!!
-def pde_res(net: SchrodingerPINN, x, t):
+# ---------------- Loss helpers ---------------------
+def hamiltonian(net, x, t):
+    #compute Hpsi for network and coordinates
     x.requires_grad_(True)
-    t.requires_grad_(True)
+    psi = net(x, t)
+    psi_x = grad(psi, x, grad_outputs=torch.ones_like(psi), create_graph=True)[0]
+    psi_xx = grad(psi_x, x, grad_outputs=torch.ones_like(psi_x), create_graph=True)[0]
 
-    psi_re, psi_im = net(x, t)
-    psi = complex_split_to_tensor(psi_re, psi_im)
+    V = harmonic_potential(x)
+    E_t = control_pulse(t)
+    Hpsi = -0.5 * psi_xx + (V - E_t * x) * psi
+    return Hpsi, psi
 
-    # First derivatives
-    psi_t = grad(psi, t, torch.ones_like(psi), create_graph=True)[0]
-    psi_x = grad(psi, x, torch.ones_like(psi), create_graph=True)[0]
-    # Second spatial derivative
-    psi_xx = grad(psi_x, x, torch.ones_like(psi_x), create_graph=True)[0]
+def residual(net, x, t):
+    x.requires_grad_(True); t.requires_grad_(True)
+    psi = net(x, t)
+    psi_grads = grad(psi, (x, t), grad_outputs=torch.ones_like(psi), create_graph=True)
+    psi_x, psi_t = psi_grads[0], psi_grads[1]
+    psi_xx = grad(psi_x, x, grad_outputs=torch.ones_like(psi_x), create_graph=True)[0]
+    # psi_t  = grad(psi, t, torch.ones_like(psi), create_graph=True)[0]
+    # psi_x  = grad(psi, x, torch.ones_like(psi), create_graph=True)[0]
+    # psi_xx = grad(psi_x, x, torch.ones_like(psi_x), create_graph=True)[0]
 
-    V = harmonic_potential(x.squeeze(-1))
+    V   = harmonic_potential(x.squeeze(-1))
+    E_t = control_pulse(t.squeeze(-1))
+    Hpsi  = -0.5 * psi_xx + (V - E_t * x.squeeze(-1)) * psi
+    r   = 1j*psi_t.squeeze(-1) - Hpsi
+    return (r.real**2 + r.imag**2).mean()
 
-    lhs = 1j * psi_t.squeeze(-1)
-    rhs = (-0.5 * psi_xx.squeeze(-1) + V * psi)
-
-    resid = lhs - rhs
-    return resid.real ** 2 + resid.imag ** 2  # |residual|^2
-
-
-def normalization_loss(psi_re, psi_im, x):
-    """Monte Carlo estimate of |ψ|^2 integral – 1."""
-    prob = psi_re ** 2 + psi_im ** 2
-    vol  = (X_MAX - X_MIN)
-    integral = vol * prob.mean()
-    return (integral - 1.0).abs()
+def norm_loss(psi):
+    return ((psi.abs()**2).mean() * (X_MAX - X_MIN) - 1).abs()
 
 
-#TRAINING UTILITY
-###############################################################################
-# 4.  Training utilities
-###############################################################################
-
-def sample_collocation(n):
+def energy_conservation_loss(net, n):
     x = torch.empty(n, 1, device=device).uniform_(X_MIN, X_MAX)
-    t = torch.empty(n, 1, device=device).uniform_(0.0, T_MAX)
-    return x.requires_grad_(True), t.requires_grad_(True)
+    t1 = torch.empty(n, 1, device=device).uniform_(0.0, T_MAX)
+    t2 = torch.empty(n, 1, device=device).uniform_(0.0, T_MAX)
 
+    # Calculate Hamiltonian and wavefunction at both times
+    Hpsi1, psi1 = hamiltonian(net, x, t1)
+    Hpsi2, psi2 = hamiltonian(net, x, t2)
 
-def sample_initial(n):
-    x = torch.empty(n, 1, device=device).uniform_(X_MIN, X_MAX)
-    t0 = torch.zeros_like(x)
-    psi0 = initial_state(x.squeeze(-1))
-    return x, t0, psi0
+    # Estimate energy expectation value via Monte Carlo integration
+    # <E> = ∫ psi* Hpsi dx
+    energy1 = (torch.conj(psi1) * Hpsi1).mean() * (X_MAX - X_MIN)
+    energy2 = (torch.conj(psi2) * Hpsi2).mean() * (X_MAX - X_MIN)
 
+    # The loss is the squared difference between the two energies
+    return (energy1.real - energy2.real)**2 + (energy1.imag - energy2.imag)**2
+# ---------------- Samplers -------------------------
 
-def sample_boundary(n):
-    # x = ±L, t ∈ [0,T]
-    xb = torch.empty(n, 1, device=device).uniform_(0.0, 1.0)
-    xb = torch.where(xb < 0.5, torch.full_like(xb, X_MIN), torch.full_like(xb, X_MAX))
-    tb = torch.empty_like(xb).uniform_(0.0, T_MAX)
-    return xb, tb
+#ADDING IMPORTANCE SAMPLING
+def collocation(n):
+    #x = torch.empty(n,1, device=device).uniform_(X_MIN, X_MAX)
+    t = torch.empty(n,1, device=device).uniform_(0.0, T_MAX)
 
+    x = torch.randn(n, 1, device=device) * 2.0 #std = 2.0
+    x = torch.clamp(x, X_MIN, X_MAX)
+    return x, t
+
+def ic_batch(n):
+    x = torch.empty(n,1, device=device).uniform_(X_MIN, X_MAX)
+    t = torch.zeros_like(x)
+    return x, t, initial_state(x.squeeze(-1))
+
+def bc_batch(n):
+    x = torch.full((n,1), X_MIN, device=device); x[n//2:] = X_MAX
+    t = torch.empty_like(x).uniform_(0.0, T_MAX)
+    return x, t
+
+# ---------------- Training -------------------------
 
 if __name__ == "__main__":
     net = SchrodingerPINN().to(device)
-    optimizer = torch.optim.Adam(net.parameters(), lr=LR)
+    opt = torch.optim.Adam(net.parameters(), lr=LR)
+    scheduler = ExponentialLR(opt, gamma=0.99)
+    
+    start = time.time()
+    for ep in range(1, EPOCHS+1):
+        opt.zero_grad(set_to_none=True)
 
-    for epoch in range(1, EPOCHS + 1):
-        optimizer.zero_grad()
+        # >>>>>>>>>>>>>>>>>>>>>>>>>> HIGHLIGHT START: DYNAMIC LOSS WEIGHTS <<<<<<<<<<<<<<<<<<<<<<<<
+        # Define the annealing schedule.
+        # 'progress' goes from 0.0 at the start to 1.0 at the end.
+        progress = ep / EPOCHS
 
-        # Collocation residual
-        xc, tc = sample_collocation(N_COL)
-        loss_pde = pde_res(net, xc, tc).mean()
+        # w_pde ramps UP from 0.1 to 10.0
+        w_pde = 0.1 + (10.0 - 0.1) * progress
+        
+        # Constraint weights ramp DOWN from 20.0 to 5.0
+        w_constraint = 20.0 + (5.0 - 20.0) * progress
+        w_ic = w_constraint
+        w_bc = w_constraint
+        w_norm = w_constraint
+        w_energy = 1.0 + (5.0- 1.0)*progress
+        # >>>>>>>>>>>>>>>>>>>>>>>>>> HIGHLIGHT END <<<<<<<<<<<<<<<<<<<<<<<<
 
-        # Initial condition loss
-        xi, ti, psi0 = sample_initial(N_IC)
-        psi_re_i, psi_im_i = net(xi, ti)
-        loss_ic = ((psi_re_i - psi0).pow(2) + psi_im_i.pow(2)).mean()
+        xc, tc = collocation(N_COL)
+        L_pde = residual(net, xc, tc)
 
-        # Boundary condition loss (Dirichlet ~0)
-        xb, tb = sample_boundary(N_BC)
-        psi_re_b, psi_im_b = net(xb, tb)
-        loss_bc = (psi_re_b.pow(2) + psi_im_b.pow(2)).mean()
+        xi, ti, psi0 = ic_batch(N_IC)
+        psi_ic = net(xi, ti)
+        L_ic = ((psi_ic - psi0).abs()**2).mean()
 
-        # Normalization loss (estimate at random slice t=uniform)
-        xn = torch.empty(N_IC, 1, device=device).uniform_(X_MIN, X_MAX)
-        tn = torch.empty_like(xn).uniform_(0.0, T_MAX)
-        psi_re_n, psi_im_n = net(xn, tn)
-        loss_norm = normalization_loss(psi_re_n, psi_im_n, xn)
+        xb, tb = bc_batch(N_BC)
+        psi_bc = net(xb, tb)
+        L_bc = (psi_bc.abs()**2).mean()
 
-        total_loss = (
-            w_pde * loss_pde + w_ic * loss_ic + w_bc * loss_bc + w_norm * loss_norm
-        )
+        xn, tn = collocation(N_IC)
+        L_norm = norm_loss(net(xn, tn))
 
-        total_loss.backward()
-        optimizer.step()
+        L_energy = energy_conservation_loss(net, N_ENERGY)
 
-        if epoch % PRINT_EVERY == 0:
-            print(f"Epoch {epoch:>6} | L_tot {total_loss.item():.4e} | "
-                  f"L_pde {loss_pde.item():.3e} | L_ic {loss_ic.item():.3e} | "
-                  f"L_bc {loss_bc.item():.3e} | L_norm {loss_norm.item():.3e}")
+        total = w_pde*L_pde + w_ic*L_ic + w_bc*L_bc + w_norm*L_norm + w_energy*L_energy
 
-    # Save trained model
-    torch.save(net.state_dict(), "pinn1d_tdse.pt")
-    print("Training complete – model saved to pinn1d_tdse.pt")
+        total.backward()
+        opt.step()
+        
+        if ep % 100 == 0:
+            scheduler.step()
+
+        if ep % PRINT_EVERY == 0:
+            print(f"Ep {ep:>5} | L {total.item():.2e} | "
+                  f"PDE {L_pde.item():.1e} IC {L_ic.item():.1e} "
+                  f"BC {L_bc.item():.1e} N {L_norm.item():.1e} | "
+                  f"LR {scheduler.get_last_lr()[0]:.1e}")
+    end = time.time()
+    dur = end - start
+    print(f"Duration: {dur:.2f} s")
+    torch.save(net.state_dict(), "pinn1d_tdse_pulse.pt")
+    print("✅  Training finished – pinn1d_tdse_pulse.pt saved")
+

@@ -34,16 +34,28 @@ def initial_state(x):
     real_part = coeff * torch.exp(-0.5 * OMEGA * x ** 2)
     return torch.complex(real_part, torch.zeros_like(real_part))
 
-
-class AdaptiveTanh(nn.Module):
-    def __init__(self, initial_a=1.0):
+class FourierEncode(nn.Module):
+    def __init__(self, in_dim=2, M=128, scale=10.0):
         super().__init__()
-        # Create a learnable parameter 'a' for the slope of the activation
-        self.a = nn.Parameter(torch.tensor(initial_a))
+        # fixed random projection, shape=(in_dim, M)
+        B = torch.randn(in_dim, M) * scale
+        self.register_buffer('B', B)
 
     def forward(self, x):
-        # The activation is now a * tanh(x)
-        return self.a * torch.tanh(x)
+        # x: (..., in_dim)
+        x_proj = (2*torch.pi * x) @ self.B    # (..., M)
+        return torch.cat([torch.sin(x_proj), torch.cos(x_proj)], dim=-1)  # (..., 2M)
+
+#Swapped for fourier
+# class AdaptiveTanh(nn.Module):
+#     def __init__(self, initial_a=1.0):
+#         super().__init__()
+#         # Create a learnable parameter 'a' for the slope of the activation
+#         self.a = nn.Parameter(torch.tensor(initial_a))
+
+#     def forward(self, x):
+#         # The activation is now a * tanh(x)
+#         return self.a * torch.tanh(x)
 
 
 class SchrodingerPINN(nn.Module):
@@ -51,18 +63,26 @@ class SchrodingerPINN(nn.Module):
         super().__init__()
         
         #bounds for normalization so it actually works
-        self.lower_bound = torch.tensor([X_MIN, T_MIN], device=device)
-        self.upper_bound = torch.tensor([X_MAX, T_MAX], device=device)
-
-        net_layers = []
-        in_dim = 2
+        # self.lower_bound = torch.tensor([X_MIN, T_MIN], device=device)
+        # self.upper_bound = torch.tensor([X_MAX, T_MAX], device=device)
+        
+        self.encoder = FourierEncode(in_dim=2, M=128, scale=10.0)
+        in_dim = 128*2
+        net_layers= []
+        #for old super simple version
+        # net_layers = []
+        # in_dim = 2
 
         for _ in range(layers):
             linear_layer = nn.Linear(in_dim, units)
             # ADAPTED: Apply Xavier Normal Initialization like the Wave PINN
             nn.init.xavier_normal_(linear_layer.weight)
             net_layers.append(linear_layer)
-            net_layers.append(AdaptiveTanh()) # Using standard Tanh as it's common and effective
+
+            #Currently unused as adding fourier
+            #net_layers.append(AdaptiveTanh()) #custom adaptive tanh
+
+            net_layers.append(nn.Tanh())
             in_dim = units
 
         final_layer = nn.Linear(in_dim, 2)
@@ -70,19 +90,35 @@ class SchrodingerPINN(nn.Module):
         net_layers.append(final_layer)
 
         self.net = nn.Sequential(*net_layers)
+        self.E0 = 0.5
 
     def forward(self, x, t):
         input_tensor = torch.cat([x, t], dim=-1)
-        normalized = 2 * (input_tensor - self.lower_bound) / (self.upper_bound - self.lower_bound) - 1
-        raw = self.net(normalized)
+        feats = self.encoder(input_tensor)
+        #norm = 2*(feats - feats.min()) / (feats.max - feats.min()) -1 hollup I already normalzie them with FFT
+        raw = self.net(feats)
         bigO = torch.complex(raw[..., 0], raw[..., 1])
-        ansata = 1.0 - t/T_MAX
-        ansatb = t/T_MAX
+        #AdaptiveTanh() version
+        # input_tensor = torch.cat([x, t], dim=-1)
+        # normalized = 2 * (input_tensor - self.lower_bound) / (self.upper_bound - self.lower_bound) - 1
+        # raw = self.net(normalized)
+        # bigO = torch.complex(raw[..., 0], raw[..., 1])
 
+        #ansat peices
+        alpha = 1.0 - t/T_MAX
+        beta = t/T_MAX
         env = (x - X_MIN) * (X_MAX - x)
-
         psi0 = initial_state(x)
-        psi = ansata * psi0 + ansatb*env*bigO
+
+        #unphase dat boi
+        psi_unphase = alpha * psi0 + beta*env*bigO
+
+        #factor out the oscilatory boy
+        real_phase = torch.cos(self.E0 * t)
+        imag_phase = -torch.sin(self.E0 * t)
+        phase = torch.complex(real_phase, imag_phase)
+
+        psi = phase * psi_unphase
         return psi
         #broken but produces something
         # normalized_input = 2.0 * (input_tensor - self.lower_bound) / (self.upper_bound - self.lower_bound) - 1.0
@@ -93,45 +129,85 @@ class SchrodingerPINN(nn.Module):
         # return psi #added ANSATZ
 
 def residual(net, x, t):
-    x.requires_grad_(True)
-    t.requires_grad_(True)
-    psi = net(x, t)
+    x = x.clone().detach().requires_grad_(True)
+    t = t.clone().detach().requires_grad_(True)
+    psi = net(x, t)      # <-- includes envelope + phase + network
+    u, v = psi.real, psi.imag
 
-    # --- FIX: Calculate gradients for real and imaginary parts separately ---
-    u = psi.real
-    v = psi.imag
+    # u_t  = torch.autograd.grad(u, t,   grad_outputs=torch.ones_like(u),
+    #                         create_graph=True)[0]
+    # v_t  = torch.autograd.grad(v, t,   grad_outputs=torch.ones_like(v),
+    #                         create_graph=True)[0]
+    # u_x  = torch.autograd.grad(u, x,   grad_outputs=torch.ones_like(u),
+    #                         create_graph=True)[0]
+    # v_x  = torch.autograd.grad(v, x,   grad_outputs=torch.ones_like(v),
+    #                         create_graph=True)[0]
+    # u_xx = torch.autograd.grad(u_x, x, grad_outputs=torch.ones_like(u_x),
+    #                         create_graph=True)[0]
+    # v_xx = torch.autograd.grad(v_x, x, grad_outputs=torch.ones_like(v_x),
+    #                         create_graph=True)[0]
 
-    # First derivatives of the real part
-    u_grads = grad(u.sum(), (x, t), create_graph=True)
-    u_x = u_grads[0]
-    u_t = u_grads[1]
+    u_t = grad(u.sum(),   t,   create_graph=True)[0]
+    v_t = grad(v.sum(),   t,   create_graph=True)[0]
+    u_x = grad(u.sum(),   x,   create_graph=True)[0]
+    v_x = grad(v.sum(),   x,   create_graph=True)[0]
+    u_xx= grad(u_x.sum(), x,   create_graph=True)[0]
+    v_xx= grad(v_x.sum(), x,   create_graph=True)[0]
 
-    # First derivatives of the imaginary part
-    v_grads = grad(v.sum(), (x, t), create_graph=True)
-    v_x = v_grads[0]
-    v_t = v_grads[1]
-
-    # Second derivative of the real part
-    u_xx = grad(u_x.sum(), x, create_graph=True)[0]
-
-    # Second derivative of the imaginary part
-    v_xx = grad(v_x.sum(), x, create_graph=True)[0]
-
-    # Reconstruct the complex derivatives
-    psi_t = torch.complex(u_t,  v_t)
+    psi_t  = torch.complex(u_t,  v_t)
     psi_xx = torch.complex(u_xx, v_xx)
 
-    # --- END FIX ---
-
-    # Now, calculate the PDE residual as before
-    i = torch.complex(torch.tensor(0., device=x.device),
-                  torch.tensor(1., device=x.device))
+    # now build the true Schrödinger residual
+    i    = torch.complex(torch.tensor(0., device=x.device),
+                        torch.tensor(1., device=x.device))
     V = harmonic_potential(x)
     E_t = control_pulse(t)
-    H_psi = -0.5 * psi_xx + (V - E_t * x) * psi
+    Hpsi = -0.5*psi_xx + (V(x) - control_pulse(t)*x)*psi
+    res  = i * psi_t - Hpsi
+
+    return torch.mean(torch.abs(res)**2)
+
+
+    #Old logic for AdaptiveTanh()
+    # x.requires_grad_(True)
+    # t.requires_grad_(True)
+    # psi = net(x, t)
+
+    # # --- FIX: Calculate gradients for real and imaginary parts separately ---
+    # u = psi.real
+    # v = psi.imag
+
+    # # First derivatives of the real part
+    # u_grads = grad(u.sum(), (x, t), create_graph=True)
+    # u_x = u_grads[0]
+    # u_t = u_grads[1]
+
+    # # First derivatives of the imaginary part
+    # v_grads = grad(v.sum(), (x, t), create_graph=True)
+    # v_x = v_grads[0]
+    # v_t = v_grads[1]
+
+    # # Second derivative of the real part
+    # u_xx = grad(u_x.sum(), x, create_graph=True)[0]
+
+    # # Second derivative of the imaginary part
+    # v_xx = grad(v_x.sum(), x, create_graph=True)[0]
+
+    # # Reconstruct the complex derivatives
+    # psi_t = torch.complex(u_t,  v_t)
+    # psi_xx = torch.complex(u_xx, v_xx)
+
+    # # --- END FIX ---
+
+    # # Now, calculate the PDE residual as before
+    # i = torch.complex(torch.tensor(0., device=x.device),
+    #               torch.tensor(1., device=x.device))
+    # V = harmonic_potential(x)
+    # E_t = control_pulse(t)
+    # H_psi = -0.5 * psi_xx + (V - E_t * x) * psi
     
-    pde_residual = i * psi_t - H_psi
-    return torch.mean(pde_residual.real**2 + pde_residual.imag**2)
+    # pde_residual = i * psi_t - H_psi
+    # return torch.mean(pde_residual.real**2 + pde_residual.imag**2)
 
 # ---------------- Samplers -------------------------
 def collocation(n):
@@ -153,6 +229,19 @@ def bc_batch(n):
     return x_left, x_right, t
 
 
+def classical_shift(t_final, n_steps=1000):
+    """
+    Compute x_cl(t_final) = (1/Ω) ∫₀ᵗ sin[Ω (t_final - τ)] E(τ) dτ
+    using a simple trapezoidal rule.
+    """
+    # sample τ between 0 and t_final
+    tau = torch.linspace(0.0, t_final, n_steps, device=device)
+    E_tau = control_pulse(tau)                    # shape (n_steps,)
+    kernel = torch.sin(OMEGA * (t_final - tau)) / OMEGA
+    # trapz over τ
+    xcl = torch.trapz(E_tau * kernel, tau)
+    return xcl.item()  # return as Python float
+
 def save_comparison_plot(net, epoch_number):
     """Generates and saves a plot comparing the PINN to the analytical solution."""
     
@@ -169,14 +258,17 @@ def save_comparison_plot(net, epoch_number):
 
         psi_pinn = net(x_plot, t_plot)
         psi_analytical = psi_true(x_plot, t_plot)
-
+        shift_val = classical_shift(T_MAX)
+        psi_analytical = psi_true(x_plot - shift_val, t_plot)
         pinn_density = (psi_pinn.abs()**2).cpu().numpy()
         analytical_density = (psi_analytical.abs()**2).cpu().numpy()
         x_coords = x_plot.cpu().numpy()
 
     plt.figure(figsize=(10, 6))
-    plt.plot(x_coords, analytical_density, 'k-', label=f'Analytical Ground State', linewidth=2)
+    #plt.plot(x_coords, analytical_density, 'k-', label=f'Analytical Ground State', linewidth=2)
+    plt.plot(x_coords, analytical_density, 'k-', label=f'Analytic (shifted by {shift_val:.2f})', linewidth=2)
     plt.plot(x_coords, pinn_density, 'c--', label=f'PINN Final State (t={T_MAX:.1f})', linewidth=2)
+
     plt.title(f"Comparison at Epoch {epoch_number}")
     plt.xlabel("Position (x)")
     plt.ylabel("Probability Density |ψ|²")
@@ -199,18 +291,29 @@ if __name__ == "__main__":
 
     net = SchrodingerPINN().to(device)
     opt = torch.optim.Adam(net.parameters(), lr=LR)
-    # We won't use a scheduler; a fixed small LR is more stable for this problem.
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        opt, mode='min',
+        factor=0.5,    # cut LR in half
+        patience=500,
+        verbose=True
+    )
 
     start = time.time()
     for ep in range(1, EPOCHS+1):
         opt.zero_grad()
 
-        # --- FINAL FIX: Use simple, strong, STATIC loss weights ---
-        # This prevents the "shock" of changing weights and constantly enforces
-        # the physical constraints, as recommended by the reference materials.
-        w_pde = 1.0   # The physics is our baseline
-        w_bc = 10.0   # Heavily penalize boundary violations
-        w_norm = 10.0 # Heavily penalize normalization violations
+        #static weights for hard constraints
+        w_bc= 100.0
+        w_norm = 500.0
+
+        #linearly ramp PDE weights from 0 to 1 over first quarter
+        # Old ramp
+        # ramp_epochs = EPOCHS // 4
+        # w_pde = min(ep / ramp_epochs, 1.0)
+
+        # new ramp: full weight by half the run, floor at 0.1
+        ramp_epochs = EPOCHS // 2
+        w_pde = 0.1 + 0.9 * min(ep / ramp_epochs, 1.0)
         
         # --- Loss calculations are the same ---
         xc, tc = collocation(N_COL)
@@ -230,6 +333,7 @@ if __name__ == "__main__":
         
         total_loss.backward()
         opt.step()
+        scheduler.step(L_pde)
         
         # --- Simplified Diagnostics ---
         if ep % PRINT_EVERY == 0 or ep == 1:

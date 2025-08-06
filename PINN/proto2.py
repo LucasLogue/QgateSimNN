@@ -307,8 +307,9 @@ if __name__ == "__main__":
         opt.zero_grad()
 
         #static weights for hard constraints
-        w_bc= 100.0
-        w_norm = 500.0
+        #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!DISABLED BECAUSE DONE IN ansatz
+        w_bc= 0
+        w_norm = 0
 
         #linearly ramp PDE weights from 0 to 1 over first quarter
         # Old ramp
@@ -328,13 +329,25 @@ if __name__ == "__main__":
         psi_bc_right = net(xb_right, tb)
         L_bc = torch.mean(psi_bc_left.abs()**2) + torch.mean(psi_bc_right.abs()**2)
 
-        xn, tn = collocation(N_IC)
-        psi_norm = net(xn, tn)
-        prob_density_integral = torch.mean(psi_norm.abs()**2) * (X_MAX - X_MIN)
-        L_norm = (prob_density_integral - 1.0)**2
+        #================================fix the norm
+        xn = torch.linspace(X_MIN, X_MAX, N_IC, device=device).unsqueeze(-1)
+        tn = torch.full_like(xn, 0.0)   # or whatever times you use for normalization check
+        psi_norm = net(xn, tn) 
+        prob2    = psi_norm.abs()**2         # shape (N_IC, 1)
+        prob2    = prob2.squeeze(-1)         # shape (N_IC,)
+        integral = torch.trapz(prob2, xn.squeeze(-1))
+        L_norm = (integral - 1.0)**2
+        # xn, tn = collocation(N_IC)
+        # psi_norm = net(xn, tn)
+        # prob_density_integral = torch.mean(psi_norm.abs()**2) * (X_MAX - X_MIN)
+        # L_norm = (prob_density_integral - 1.0)**2
+        #================================fix the norm
 
-        total_loss = w_pde * L_pde + w_bc * L_bc + w_norm * L_norm
-        
+        #================================manual setting of loss to 0 to prevent double dip
+        L_norm = 0.0
+        L_bc = 0.0
+        total_loss = w_pde * L_pde #+ w_bc * L_bc + w_norm * L_norm
+        #print("total_loss shape:", total_loss.shape)
         total_loss.backward()
         opt.step()
         scheduler.step(L_pde)
@@ -343,7 +356,7 @@ if __name__ == "__main__":
         if ep % PRINT_EVERY == 0 or ep == 1:
             print("-" * 60)
             print(f"Epoch {ep:>5} | Total Loss: {total_loss.item():.2e} | LR: {opt.param_groups[0]['lr']:.1e}")
-            print(f"  L_pde: {L_pde.item():.2e} | L_bc: {L_bc.item():.2e} | L_norm: {L_norm.item():.2e}")
+            print(f"  L_pde: {L_pde.item():.2e}")# | L_bc: {L_bc.item():.2e} | L_norm: {L_norm.item():.2e}")
 
         # Save a plot midway to check progress
         if ep == EPOCHS // 2:

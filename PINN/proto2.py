@@ -110,15 +110,19 @@ class SchrodingerPINN(nn.Module):
         env = (x - X_MIN) * (X_MAX - x)
         psi0 = initial_state(x)
 
+        env_bc = 1 - (x / X_MAX)**2 #MURDER BOUNDARIES ONLY
         #unphase dat boi
-        psi_unphase = alpha * psi0 + beta*env*bigO
+        psi_unphase = alpha * psi0 + beta*env_bc*bigO
 
         #factor out the oscilatory boy
         real_phase = torch.cos(self.E0 * t)
         imag_phase = -torch.sin(self.E0 * t)
         phase = torch.complex(real_phase, imag_phase)
 
-        psi = phase * psi_unphase
+        psi_raw = phase * psi_unphase
+        p = torch.abs(psi_raw)**2
+        norm_factor = torch.sqrt(torch.mean(p)*(X_MAX-X_MIN))
+        psi = psi_raw / norm_factor
         return psi
         #broken but produces something
         # normalized_input = 2.0 * (input_tensor - self.lower_bound) / (self.upper_bound - self.lower_bound) - 1.0
@@ -162,7 +166,7 @@ def residual(net, x, t):
                         torch.tensor(1., device=x.device))
     V = harmonic_potential(x)
     E_t = control_pulse(t)
-    Hpsi = -0.5*psi_xx + (V(x) - control_pulse(t)*x)*psi
+    Hpsi = -0.5*psi_xx + (V - control_pulse(t)*x)*psi
     res  = i * psi_t - Hpsi
 
     return torch.mean(torch.abs(res)**2)

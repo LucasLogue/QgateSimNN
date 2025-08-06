@@ -26,11 +26,12 @@ def get_potential(cfgname, X, Y, Z, params={}):
     if cfgname == "ideal":
         return harmonic_potential(X, Y, Z, **params)
     elif cfgname == "disordered":
-        omega= params.get("omega", 1.0)
-        V_ideal = harmonic_potential(X, Y, Z, omega=omega)
-        V_disord = disordered_harmonic_potential(X, Y, Z, **params)
-        D = (V_disord- V_ideal).flatten().abs().mean().item()
-        print("SANITY CHECK! ", D)
+        #Debugging logic, commented out for efficiency
+        # omega= params.get("omega", 1.0)
+        # V_ideal = harmonic_potential(X, Y, Z, omega=omega)
+        # V_disord = disordered_harmonic_potential(X, Y, Z, **params)
+        # D = (V_disord- V_ideal).flatten().abs().mean().item()
+        # print("SANITY CHECK! ", D)
         return disordered_harmonic_potential(X, Y, Z, **params)
     else:
         raise ValueError("bruh we dont have that")

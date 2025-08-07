@@ -50,7 +50,7 @@ def optimise(domain, t_vec, maxiter, popsize, init_guess, bounds, cma_stds):
     time_steps = len(t_vec)
     dt = t_vec[1].item() - t_vec[0].item()
 
-    def obj_fn(params): return objective_function(params, domain, dt, time_steps)
+    def obj_fn(params): return obj_fn(params, domain, dt, time_steps)
 
     res, es = cma.fmin2(obj_fn, init_guess, 5.0, {
         "bounds": bounds,
@@ -61,3 +61,49 @@ def optimise(domain, t_vec, maxiter, popsize, init_guess, bounds, cma_stds):
 
     best_fidelity = 1.0 - np.exp(es.result.fbest)
     return best_fidelity, res
+
+def obj_fn(params):
+    return objective_function(params, domain=domain, dt=dt, time_steps=time_steps)
+def run_cli_job(trap, gate, omega, delta=None, maxiter=20, popsize=10):
+    # --- Step 1: Set potential config
+    np.random.seed(42)
+    pot_params = {"omega": omega}
+    if trap == "doublewell" and delta is not None:
+        pot_params["delta"] = delta
+        pot_params["input_state"] = "10"
+
+    GRID = 64
+    DT = 0.005
+    STEPS = 500
+    total_time = STEPS * DT
+    pot_params["time_steps"] = total_time
+    # --- Step 2: Build domain
+    print()
+    print()
+    print(GRID, DT, trap, pot_params)
+    print()
+    print()
+    dom = build_domain(GRID, DT, trap, pot_params)
+    dom["initial_psi"] = qdotlib.get_ground(dom["X"], dom["Y"], dom["Z"], omega, dom["volume"])
+    dom["target_psi"] = make_target(gate, dom, pot_params)
+
+    # --- Step 3: Setup CMA‑ES params
+    t_vec = torch.arange(STEPS, device="cuda") * DT
+    init_guess = [10.0, omega, 0.0, total_time/2, total_time/4]
+    bounds = [[-50, 0.1, -np.pi, 0, 0.1],
+              [50, omega*2, np.pi, total_time, total_time]]
+    cma_stds = [10.0, 0.5, np.pi/4, total_time/4, total_time/4]
+
+    # --- Step 4: Run optimiser
+    best_fid, best_params = optimise(dom, t_vec, maxiter, popsize, init_guess, bounds, cma_stds)
+
+    return {
+        "fidelity": best_fid,
+        "params": {
+            "amplitude": best_params[0],
+            "frequency": best_params[1],
+            "phase": best_params[2],
+            "pulse_center": best_params[3],
+            "pulse_width": abs(best_params[4]),
+        }
+    }

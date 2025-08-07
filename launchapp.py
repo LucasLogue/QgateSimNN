@@ -3,31 +3,46 @@ import threading
 import subprocess
 import time
 import os
-import signal
 import sys
+import platform
+import socket
+import re
+
+PORT = 8600  # Change this to anything you want
+
+def wait_for_port(host: str, port: int, timeout: int = 20):
+    start_time = time.time()
+    while True:
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                return True
+        except (ConnectionRefusedError, OSError):
+            if time.time() - start_time > timeout:
+                return False
+            time.sleep(0.5)
 
 def start_streamlit():
-    # Optional: kill any previous streamlit instances on port 8501
-    subprocess.call("fuser -k 8501/tcp", shell=True)
+    print(f"[+] Launching Streamlit server on port {PORT}...")
 
-    # Run Streamlit in the background, headless (no auto-open browser)
     subprocess.Popen(
-        ["streamlit", "run", "app.py", "--server.headless", "true"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        preexec_fn=os.setsid if os.name != 'nt' else None  # for clean shutdown on Linux
+        ["streamlit", "run", "app.py", "--server.headless", "true", f"--server.port={PORT}"],
+        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if platform.system() == "Windows" else 0
     )
 
-    # Wait a few seconds for Streamlit server to boot
-    time.sleep(3)
+    if not wait_for_port("localhost", PORT, timeout=20):
+        print(f"❌ Streamlit server failed to start on port {PORT} within timeout.")
+        sys.exit(1)
+    print(f"✅ Streamlit server is up on http://localhost:{PORT}")
 
 if __name__ == "__main__":
     threading.Thread(target=start_streamlit, daemon=True).start()
 
-    # Make the pop-out window with pywebview
-    try:
-        webview.create_window("Quantum Dot Gate Optimizer", "http://localhost:8501",
-                              width=1280, height=800, resizable=True)
-    except KeyboardInterrupt:
-        print("\n[!] Closing window... bye bye")
-        sys.exit(0)
+    # Small grace delay before launching GUI
+    time.sleep(1.5)
+
+    # Create the pop-out window
+    webview.create_window("Quantum Dot Gate Optimizer", f"http://localhost:{PORT}",
+                          width=1280, height=800, resizable=True)
+
+    # Start the GUI using Edge backend
+    webview.start(gui='edgechromium')#, debug=True)

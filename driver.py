@@ -15,9 +15,9 @@ if torch.cuda.is_available():
           torch.cuda.get_device_name(0))
 #EXPERIMENT CONFIG PARAMS
 ISBREV = False
-ELECCONFIG = "doublewell" #can be ideal, disordered, doublewell
+ELECCONFIG = "disordered" #can be ideal, disordered, doublewell
 
-GATE_TO_OPTIMIZE = "BELL"  # Can be "NOT" or "HADAMARD", "CNOT", "OR BELL STATE"
+GATE_TO_OPTIMIZE = "NOT"  # Can be "NOT" or "HADAMARD", "CNOT", "OR BELL STATE"
 if ELECCONFIG == "ideal":
     POTENTIAL_CONFIG = {'name': 'ideal', 'params': {'omega': 1.0}}
 elif ELECCONFIG == "disordered":
@@ -25,7 +25,7 @@ elif ELECCONFIG == "disordered":
         'name':   'disordered',
         'params': {
             'omega':      1.0,
-            'noise_amp':  1.0,
+            'noise_amp':  0.1,
             'corr_len':   5
         }
     }
@@ -61,12 +61,19 @@ TIME_STEPS = 500 # Number of time steps in the simulation
 DT = 0.005 # Time step duration
 domain["t"] = torch.arange(TIME_STEPS, device="cuda") * DT
 #Chosen Domain
-params_init = POTENTIAL_CONFIG.get('params', {}).copy()
+params_init = POTENTIAL_CONFIG.copy()
 (X, Y, Z, dx, dy, dz, V, halfkprop, K2) = qdotlib.init_domain(
         Nx=GRID_SIZE, Ny=GRID_SIZE, Nz=GRID_SIZE, dt=DT,
         potential_cfg=params_init 
     )
+V_real = V.real
 
+print(
+    f"Potential stats:  "
+    f"min={V_real.min().item():.3f},  "
+    f"max={V_real.max().item():.3f},  "
+    f"mean={V_real.mean().item():.3f}"
+)
 domain["volume"] = dx * dy * dz
 params_target['vol'] = domain['volume']
 omega = POTENTIAL_CONFIG['params'].get('omega', 1.0)
@@ -132,6 +139,11 @@ def objective_function(params, *, st=domain):
     envelope = torch.exp(-((dt_vec - pulse_center_t) / pulse_width)**2)
     drive_pulse = control_amp * envelope * torch.sin(control_freq * dt_vec + control_phase)
     control_shape = st["X"]  # Simple dipole interaction in the x-direction
+    print(">> drive_pulse[:5] =", drive_pulse[:5].detach().cpu().numpy())
+    print(f">> drive_pulse mean={drive_pulse.mean().item():.3e}, std={drive_pulse.std().item():.3e}")
+    nz = int((control_shape != 0).sum().item())
+    tot = control_shape.numel()
+    print(f">> control_shape nonzero entries: {nz}/{tot}")
 
     #Simulation call, needs to be done in every loop
     final_psi = qdotlib.RUN_SIM(st["initial_psi"], st["V"], st["halfk"], st["K2"], DT, TIME_STEPS, drive_pulse, control_shape)
@@ -185,7 +197,7 @@ if __name__ == '__main__':
     # Run the CMA-ES optimizer
     best_params, es = cma.fmin2(objective_function,
                                initial_guess,
-                               initial_std_dev,
+                               sigma0=initial_std_dev,
                                options=options
                                ) # Fewer iterations for 3D
 
@@ -193,7 +205,7 @@ if __name__ == '__main__':
     duration = time.time() - start_time
     print("\n--- Optimization Finished ---")
     print(f"Total duration: {duration:.2f} s")
-
+    #print("‖ψ_final‖² =", torch.sum(torch.abs(final_psi)**2).item() * domain["volume"])
     best_infidelity = np.exp(es.result.fbest)
     best_fidelity = 1.0 - best_infidelity
 

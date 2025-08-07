@@ -93,37 +93,68 @@ class SchrodingerPINN(nn.Module):
         self.E0 = 0.5
 
     def forward(self, x, t):
-        input_tensor = torch.cat([x, t], dim=-1)
-        feats = self.encoder(input_tensor)
-        #norm = 2*(feats - feats.min()) / (feats.max - feats.min()) -1 hollup I already normalzie them with FFT
-        raw = self.net(feats)
-        bigO = torch.complex(raw[..., 0], raw[..., 1])
-        #AdaptiveTanh() version
-        # input_tensor = torch.cat([x, t], dim=-1)
-        # normalized = 2 * (input_tensor - self.lower_bound) / (self.upper_bound - self.lower_bound) - 1
-        # raw = self.net(normalized)
-        # bigO = torch.complex(raw[..., 0], raw[..., 1])
+        # --- 1) compute classical shift x_cl(t) for each sample ---
+        # classical_shift returns a Python float, so we map it over the batch
+        t_flat = t.detach().cpu().squeeze(-1).tolist()      # list of times
+        x_cl_list = [classical_shift(ti) for ti in t_flat]  # one float per sample
+        x_cl = torch.tensor(x_cl_list, device=x.device).unsqueeze(-1)  # (batch,1)
 
-        #ansat peices
-        alpha = 1.0 - t/T_MAX
-        beta = t/T_MAX
-        env = (x - X_MIN) * (X_MAX - x)
-        psi0 = initial_state(x)
+        # shift coordinates
+        x_shifted = x - x_cl
 
-        env_bc = 1 - (x / X_MAX)**2 #MURDER BOUNDARIES ONLY
-        #unphase dat boi
-        psi_unphase = alpha * psi0 + beta*env_bc*bigO
+        # --- 2) build shifted‐ground‐state + network residual ---
+        psi0_s = initial_state(x_shifted)  # exact ground‐state at the shifted center
+        alpha  = 1.0 - t / T_MAX
+        beta   =       t / T_MAX
 
-        #factor out the oscilatory boy
+        # encode on the shifted coordinates
+        inp    = torch.cat([x_shifted, t], dim=-1)
+        feats  = self.encoder(inp)
+        raw    = self.net(feats)
+        phi    = torch.complex(raw[...,0], raw[...,1])
+
+        # interpolate: at t=0 → psi0_s, at t=T_MAX → network correction
+        psi_unphased = alpha * psi0_s + beta * phi
+
+        # --- 3) factor out the known oscillatory phase ---
         real_phase = torch.cos(self.E0 * t)
         imag_phase = -torch.sin(self.E0 * t)
-        phase = torch.complex(real_phase, imag_phase)
+        phase      = torch.complex(real_phase, imag_phase)
 
-        psi_raw = phase * psi_unphase
-        p = torch.abs(psi_raw)**2
-        norm_factor = torch.sqrt(torch.mean(p)*(X_MAX-X_MIN))
-        psi = psi_raw / norm_factor
-        return psi
+        return phase * psi_unphased
+
+    # def forward(self, x, t):
+    #     input_tensor = torch.cat([x, t], dim=-1)
+    #     feats = self.encoder(input_tensor)
+    #     #norm = 2*(feats - feats.min()) / (feats.max - feats.min()) -1 hollup I already normalzie them with FFT
+    #     raw = self.net(feats)
+    #     bigO = torch.complex(raw[..., 0], raw[..., 1])
+    #     #AdaptiveTanh() version
+    #     # input_tensor = torch.cat([x, t], dim=-1)
+    #     # normalized = 2 * (input_tensor - self.lower_bound) / (self.upper_bound - self.lower_bound) - 1
+    #     # raw = self.net(normalized)
+    #     # bigO = torch.complex(raw[..., 0], raw[..., 1])
+
+    #     #ansat peices
+    #     alpha = 1.0 - t/T_MAX
+    #     beta = t/T_MAX
+    #     env = (x - X_MIN) * (X_MAX - x)
+    #     psi0 = initial_state(x)
+
+    #     env_bc = 1 - (x / X_MAX)**2 #MURDER BOUNDARIES ONLY
+    #     #unphase dat boi
+    #     psi_unphase = alpha * psi0 + beta*env_bc*bigO
+
+    #     #factor out the oscilatory boy
+    #     real_phase = torch.cos(self.E0 * t)
+    #     imag_phase = -torch.sin(self.E0 * t)
+    #     phase = torch.complex(real_phase, imag_phase)
+
+    #     psi_raw = phase * psi_unphase
+    #     # p = torch.abs(psi_raw)**2
+    #     # norm_factor = torch.sqrt(torch.mean(p)*(X_MAX-X_MIN))
+    #     # psi = psi_raw / norm_factor
+    #     return psi_raw #no normalization because we'll do that for the weights
         #broken but produces something
         # normalized_input = 2.0 * (input_tensor - self.lower_bound) / (self.upper_bound - self.lower_bound) - 1.0
         # raw_output = self.net(normalized_input)
@@ -309,7 +340,7 @@ if __name__ == "__main__":
         #static weights for hard constraints
         #!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!DISABLED BECAUSE DONE IN ansatz
         w_bc= 0
-        w_norm = 0
+        w_norm = 100.0
 
         #linearly ramp PDE weights from 0 to 1 over first quarter
         # Old ramp
@@ -331,12 +362,14 @@ if __name__ == "__main__":
 
         #================================fix the norm
         xn = torch.linspace(X_MIN, X_MAX, N_IC, device=device).unsqueeze(-1)
-        tn = torch.full_like(xn, 0.0)   # or whatever times you use for normalization check
+        tn = torch.full_like(xn, T_MIN)   # or whatever times you use for normalization check
         psi_norm = net(xn, tn) 
+
         prob2    = psi_norm.abs()**2         # shape (N_IC, 1)
         prob2    = prob2.squeeze(-1)         # shape (N_IC,)
         integral = torch.trapz(prob2, xn.squeeze(-1))
-        L_norm = (integral - 1.0)**2
+        L_norm_vec = (integral - 1.0)**2
+        L_norm     = L_norm_vec.mean()
         # xn, tn = collocation(N_IC)
         # psi_norm = net(xn, tn)
         # prob_density_integral = torch.mean(psi_norm.abs()**2) * (X_MAX - X_MIN)
@@ -344,9 +377,10 @@ if __name__ == "__main__":
         #================================fix the norm
 
         #================================manual setting of loss to 0 to prevent double dip
-        L_norm = 0.0
+        #L_norm = 0.0
         L_bc = 0.0
-        total_loss = w_pde * L_pde #+ w_bc * L_bc + w_norm * L_norm
+        total_loss = w_pde * L_pde + w_norm * L_norm #+ w_bc * L_bc + w_norm * L_norm
+        total_loss = (w_pde * L_pde + w_norm * L_norm).sum() #failsafe
         #print("total_loss shape:", total_loss.shape)
         total_loss.backward()
         opt.step()
@@ -356,7 +390,7 @@ if __name__ == "__main__":
         if ep % PRINT_EVERY == 0 or ep == 1:
             print("-" * 60)
             print(f"Epoch {ep:>5} | Total Loss: {total_loss.item():.2e} | LR: {opt.param_groups[0]['lr']:.1e}")
-            print(f"  L_pde: {L_pde.item():.2e}")# | L_bc: {L_bc.item():.2e} | L_norm: {L_norm.item():.2e}")
+            print(f"  L_pde: {L_pde.item():.2e} | L_norm: {L_norm.item():.2e}")# | L_bc: {L_bc.item():.2e} | L_norm: {L_norm.item():.2e}")
 
         # Save a plot midway to check progress
         if ep == EPOCHS // 2:

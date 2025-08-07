@@ -4,7 +4,8 @@ import cma
 import time
 from pathlib import Path
 import matplotlib.pyplot as plt
-
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='cma.*')
 # Import our installed quantum dot library
 import qdotlib
 
@@ -59,7 +60,11 @@ def run_cli_job(
     domain["target_psi"] = qdotlib.target_gate_function(gate, X, Y, Z, params=potential_params)
     domain.update({"X": X, "Y": Y, "Z": Z, "V": V, "K2": K2, "halfk": halfkprop, "dx": dx, "dy": dy})
     domain["t"] = torch.arange(time_steps, device="cuda") * dt
-
+    print("\n--- PyTorch Sanity Check ---")
+    print(f"    PyTorch version: {torch.__version__}")
+    # The .device attribute tells you if the tensor is on 'cpu' or 'cuda:0'
+    print(f"    Simulation tensors are on device: '{domain['t'].device}'")
+    print("----------------------------\n")
     # 3. Define the Objective Function (reused for both phases)
     def objective_function(params):
         nonlocal _snapshot_done
@@ -68,7 +73,7 @@ def run_cli_job(
         dt_vec = domain["t"]
         envelope = torch.exp(-((dt_vec - pulse_center_t) / pulse_width)**2)
         drive_pulse = control_amp * envelope * torch.sin(control_freq * dt_vec + control_phase)
-        control_shape = domain["X"]
+        control_shape = domain["X"] * domain["Y"]
         if not _snapshot_done:
             # (Plotting logic remains the same)
             project_root = Path(__file__).resolve().parent; out_dir = project_root / "outputinfo"; out_dir.mkdir(exist_ok=True)

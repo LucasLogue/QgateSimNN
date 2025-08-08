@@ -1,0 +1,29 @@
+Using device: cuda
+Pre-computing classical trajectory...
+--- Starting Stage 1: Adam Optimizer ---
+--- Starting Training (Co-Moving Frame Model) ---
+[Xc_lookup]  sample_t=[2.1887977  0.35805267 0.15318583]  Xc_sample=[6.327828   0.28045055 0.04929958]
+[forward]  x_sample=[ 1.1295986 -4.8994117 -1.0158632]  Xc_sample=[6.327828   0.28045055 0.04929958]  x_prime=[-5.1982293 -5.179862  -1.0651628]
+[chain_rule]  u_t_in=[-1.1592990e-05 -1.2859117e-04  1.3638071e-03]  corr=[-0.00099786 -0.01864136 -0.00261621]  u_t_lab=[-0.00100946 -0.01876995 -0.00125241]
+[iter]  step=500  loss=0.9063347578048706  PDE=0.04101955145597458  x_cm_batch=0.033705905079841614  norm=0.3058604598045349
+[iter]  step=1000  loss=0.8677353262901306  PDE=0.04573307931423187  x_cm_batch=-0.006109114736318588  norm=0.36812257766723633
+[iter]  step=1500  loss=0.9670379161834717  PDE=0.04259587451815605  x_cm_batch=-0.06123363971710205  norm=0.27293989062309265
+[iter]  step=2000  loss=0.4413158893585205  PDE=0.036053888499736786  x_cm_batch=0.02598937228322029  norm=0.7378319501876831
+[iter]  step=2500  loss=0.46213510632514954  PDE=0.04473232477903366  x_cm_batch=0.03238091617822647  norm=1.042154312133789
+[iter]  step=3000  loss=0.7731860280036926  PDE=0.032148413360118866  x_cm_batch=-0.006279602646827698  norm=0.3399975001811981
+[iter]  step=3500  loss=0.7158681154251099  PDE=0.025639811530709267  x_cm_batch=-0.05119027942419052  norm=0.331561416387558
+[iter]  step=4000  loss=0.44406116008758545  PDE=0.03227955102920532  x_cm_batch=-0.017541488632559776  norm=0.667125940322876
+[iter]  step=4500  loss=0.526408314704895  PDE=0.032679229974746704  x_cm_batch=-0.0009778952226042747  norm=0.5701477527618408
+[iter]  step=5000  loss=0.6438775658607483  PDE=0.05319961532950401  x_cm_batch=0.049614619463682175  norm=0.6874155402183533
+
+--- Starting Stage 2: L-BFGS Optimizer ---
+Training finished.
+Training finished.
+Model saved to pinn_schrodinger_3d.pth
+Starting post-processing and visualization...
+Corrected classical x-shift at t=3.0: 4.9706
+
+--- Quantitative Sanity Check ---
+PINN <x>(t=3.0) ≈ -3.5434
+Classical Xc(t=3.0) = 4.9706
+Plot saved to pinn_schrodinger_3d_results.png

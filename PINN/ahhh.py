@@ -62,7 +62,7 @@ L = 10.0
 
 # Hyperparameters
 LEARNING_RATE = 2e-5
-NUM_ITERATIONS = 15000 # Let's give this promising architecture a good run
+NUM_ITERATIONS = 10000 # Let's give this promising architecture a good run
 
 N_COLLOCATION = 4096
 N_INITIAL = 2048
@@ -153,15 +153,10 @@ class PINN(nn.Module):
                 net_layers.append(nn.Tanh())
         return nn.Sequential(*net_layers)
 
-    def forward(self, x, y, z, t):
-        # Transform to the co-moving frame
+    # --- NEW: Internal method to avoid duplicate work ---
+    def _forward_base(self, x, y, z, t):
+        """Performs the core forward pass shared by other methods."""
         x_prime = x - get_Xc(t)
-        if not hasattr(self, "_dbg_fwd"):
-            dbg("forward",
-                x_sample=x[:3].flatten(),
-                Xc_sample=get_Xc(t)[:3].flatten(),
-                x_prime=x_prime[:3].flatten())
-            self._dbg_fwd = True
         
         # Normalize inputs for stability
         x_prime_norm = x_prime / L
@@ -170,14 +165,19 @@ class PINN(nn.Module):
         t_norm = 2.0 * (t - T_MIN) / (T_MAX - T_MIN) - 1.0
         
         inputs = torch.cat([x_prime_norm, y_norm, z_norm, t_norm], dim=1)
-        
         nn_output = self.net(inputs)
+        
         A_raw = nn_output[:, 0:1]
         S_raw = nn_output[:, 1:2]
         
-        # Cutoff function is also in the moving frame
-        cutoff = (1 - (x_prime / L)**2) * (1 - y_norm**2) * (1 - z_norm**2)
+        return A_raw, S_raw, x_prime, y_norm, z_norm
+
+    def forward(self, x, y, z, t):
+        # Call the shared base method
+        A_raw, S_raw, x_prime, y_norm, z_norm = self._forward_base(x, y, z, t)
         
+        # Perform the final calculations for u and v
+        cutoff = (1 - (x_prime / L)**2) * (1 - y_norm**2) * (1 - z_norm**2)
         A = cutoff * A_raw
         S = S_raw
         
@@ -187,22 +187,15 @@ class PINN(nn.Module):
         return u, v
     
     def get_A_S(self, x, y, z, t):
-        """Helper function to get A and S directly for the IC loss."""
-        x_prime = x - get_Xc(t)
-        x_prime_norm = x_prime / L
-        y_norm = y / L
-        z_norm = z / L
-        t_norm = 2.0 * (t - T_MIN) / (T_MAX - T_MIN) - 1.0
-        inputs = torch.cat([x_prime_norm, y_norm, z_norm, t_norm], dim=1)
-        nn_output = self.net(inputs)
-        A_raw = nn_output[:, 0:1]
-        S_raw = nn_output[:, 1:2]
+        # Call the shared base method
+        A_raw, S_raw, x_prime, y_norm, z_norm = self._forward_base(x, y, z, t)
+        
+        # Perform the final calculations for A and S
         cutoff = (1 - (x_prime / L)**2) * (1 - y_norm**2) * (1 - z_norm**2)
         A = cutoff * A_raw
         S = S_raw
+        
         return A, S
-
-
 # class PINN(nn.Module):
 #     """
 #     PINN in a co-moving frame of reference.
@@ -222,10 +215,15 @@ class PINN(nn.Module):
 #                 net_layers.append(nn.Tanh())
 #         return nn.Sequential(*net_layers)
 
-#     # --- NEW: Internal method to avoid duplicate work ---
-#     def _forward_base(self, x, y, z, t):
-#         """Performs the core forward pass shared by other methods."""
+#     def forward(self, x, y, z, t):
+#         # Transform to the co-moving frame
 #         x_prime = x - get_Xc(t)
+#         if not hasattr(self, "_dbg_fwd"):
+#             dbg("forward",
+#                 x_sample=x[:3].flatten(),
+#                 Xc_sample=get_Xc(t)[:3].flatten(),
+#                 x_prime=x_prime[:3].flatten())
+#             self._dbg_fwd = True
         
 #         # Normalize inputs for stability
 #         x_prime_norm = x_prime / L
@@ -234,19 +232,14 @@ class PINN(nn.Module):
 #         t_norm = 2.0 * (t - T_MIN) / (T_MAX - T_MIN) - 1.0
         
 #         inputs = torch.cat([x_prime_norm, y_norm, z_norm, t_norm], dim=1)
-#         nn_output = self.net(inputs)
         
+#         nn_output = self.net(inputs)
 #         A_raw = nn_output[:, 0:1]
 #         S_raw = nn_output[:, 1:2]
         
-#         return A_raw, S_raw, x_prime, y_norm, z_norm
-
-#     def forward(self, x, y, z, t):
-#         # Call the shared base method
-#         A_raw, S_raw, x_prime, y_norm, z_norm = self._forward_base(x, y, z, t)
-        
-#         # Perform the final calculations for u and v
+#         # Cutoff function is also in the moving frame
 #         cutoff = (1 - (x_prime / L)**2) * (1 - y_norm**2) * (1 - z_norm**2)
+        
 #         A = cutoff * A_raw
 #         S = S_raw
         
@@ -256,67 +249,109 @@ class PINN(nn.Module):
 #         return u, v
     
 #     def get_A_S(self, x, y, z, t):
-#         # Call the shared base method
-#         A_raw, S_raw, x_prime, y_norm, z_norm = self._forward_base(x, y, z, t)
-        
-#         # Perform the final calculations for A and S
+#         """Helper function to get A and S directly for the IC loss."""
+#         x_prime = x - get_Xc(t)
+#         x_prime_norm = x_prime / L
+#         y_norm = y / L
+#         z_norm = z / L
+#         t_norm = 2.0 * (t - T_MIN) / (T_MAX - T_MIN) - 1.0
+#         inputs = torch.cat([x_prime_norm, y_norm, z_norm, t_norm], dim=1)
+#         nn_output = self.net(inputs)
+#         A_raw = nn_output[:, 0:1]
+#         S_raw = nn_output[:, 1:2]
 #         cutoff = (1 - (x_prime / L)**2) * (1 - y_norm**2) * (1 - z_norm**2)
 #         A = cutoff * A_raw
 #         S = S_raw
-        
 #         return A, S
 
 # --- Loss Calculation ---
 
-# --- Loss Calculation ---
 def pde_residual(model, x, y, z, t):
-    """Calculate the residual of the Schrödinger PDE."""
+    """Calculate the residual of the Schrödinger PDE (Optimized)."""
     x.requires_grad_(True); y.requires_grad_(True); z.requires_grad_(True); t.requires_grad_(True)
+    
     u, v = model(x, y, z, t)
 
-    # u_t and v_t from autograd are INCOMPLETE because the gradient path through get_Xc is broken.
-    # They represent the change in psi within the moving frame (∂ψ/∂t_moving).
-    u_t_incomplete = torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), create_graph=True)[0]
-    v_t_incomplete = torch.autograd.grad(v, t, grad_outputs=torch.ones_like(v), create_graph=True)[0]
-    
-    u_x = torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), create_graph=True)[0]
-    v_x = torch.autograd.grad(v, x, grad_outputs=torch.ones_like(v), create_graph=True)[0]
+    # --- Bundle derivative calculations for u ---
+    # Calculate all first-order derivatives of u in one go
+    u_grads = torch.autograd.grad(u, [x, y, z, t], grad_outputs=torch.ones_like(u), create_graph=True)
+    u_x, u_y, u_z, u_t_incomplete = u_grads[0], u_grads[1], u_grads[2], u_grads[3]
 
-    # Manually add the missing part of the chain rule to get the full lab-frame time derivative.
-    # ∂ψ/∂t_lab = ∂ψ/∂t_moving + Xc_dot * ∂ψ/∂x
-    xc_dot = get_Xc_dot(t)
-    u_t = u_t_incomplete - xc_dot * u_x
-    v_t = v_t_incomplete - xc_dot * v_x
-
-    # The rest of the calculation proceeds as before
-    u_y = torch.autograd.grad(u, y, grad_outputs=torch.ones_like(u), create_graph=True)[0]
-    # ... (and so on for all other derivatives) ...
-    u_z = torch.autograd.grad(u, z, grad_outputs=torch.ones_like(u), create_graph=True)[0]
-    v_y = torch.autograd.grad(v, y, grad_outputs=torch.ones_like(v), create_graph=True)[0]
-    v_z = torch.autograd.grad(v, z, grad_outputs=torch.ones_like(v), create_graph=True)[0]
+    # Calculate second-order derivatives from the first-order ones
     u_xx = torch.autograd.grad(u_x, x, grad_outputs=torch.ones_like(u_x), create_graph=True)[0]
     u_yy = torch.autograd.grad(u_y, y, grad_outputs=torch.ones_like(u_y), create_graph=True)[0]
     u_zz = torch.autograd.grad(u_z, z, grad_outputs=torch.ones_like(u_z), create_graph=True)[0]
+    lap_u = u_xx + u_yy + u_zz
+
+    # --- Bundle derivative calculations for v ---
+    v_grads = torch.autograd.grad(v, [x, y, z, t], grad_outputs=torch.ones_like(v), create_graph=True)
+    v_x, v_y, v_z, v_t_incomplete = v_grads[0], v_grads[1], v_grads[2], v_grads[3]
+
     v_xx = torch.autograd.grad(v_x, x, grad_outputs=torch.ones_like(v_x), create_graph=True)[0]
     v_yy = torch.autograd.grad(v_y, y, grad_outputs=torch.ones_like(v_y), create_graph=True)[0]
     v_zz = torch.autograd.grad(v_z, z, grad_outputs=torch.ones_like(v_z), create_graph=True)[0]
-    
-    lap_u = u_xx + u_yy + u_zz
     lap_v = v_xx + v_yy + v_zz
-    V = V_potential(x, y, z, t)
 
-    # The residual calculation now uses the full, correct lab-frame time derivative
+    # --- Apply chain rule and compute residuals (no changes here) ---
+    xc_dot = get_Xc_dot(t)
+    u_t = u_t_incomplete - xc_dot * u_x
+    v_t = v_t_incomplete - xc_dot * v_x
+    
+    V = V_potential(x, y, z, t)
     f_u = u_t + 0.5 * lap_v - V * v
     f_v = v_t - 0.5 * lap_u + V * u
-
-    if not hasattr(pde_residual, "_dbg_res"):
-        dbg("chain_rule",
-            u_t_in=u_t_incomplete[:3].flatten(),
-            corr=(-xc_dot*u_x)[:3].flatten(),
-            u_t_lab=u_t[:3].flatten())
-        pde_residual._dbg_res = True
     
     return f_u, f_v
+
+
+# def pde_residual(model, x, y, z, t):
+#     """Calculate the residual of the Schrödinger PDE."""
+#     x.requires_grad_(True); y.requires_grad_(True); z.requires_grad_(True); t.requires_grad_(True)
+#     u, v = model(x, y, z, t)
+
+#     # u_t and v_t from autograd are INCOMPLETE because the gradient path through get_Xc is broken.
+#     # They represent the change in psi within the moving frame (∂ψ/∂t_moving).
+#     u_t_incomplete = torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), create_graph=True)[0]
+#     v_t_incomplete = torch.autograd.grad(v, t, grad_outputs=torch.ones_like(v), create_graph=True)[0]
+    
+#     u_x = torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), create_graph=True)[0]
+#     v_x = torch.autograd.grad(v, x, grad_outputs=torch.ones_like(v), create_graph=True)[0]
+
+#     # Manually add the missing part of the chain rule to get the full lab-frame time derivative.
+#     # ∂ψ/∂t_lab = ∂ψ/∂t_moving + Xc_dot * ∂ψ/∂x
+#     xc_dot = get_Xc_dot(t)
+#     u_t = u_t_incomplete - xc_dot * u_x
+#     v_t = v_t_incomplete - xc_dot * v_x
+
+#     # The rest of the calculation proceeds as before
+#     u_y = torch.autograd.grad(u, y, grad_outputs=torch.ones_like(u), create_graph=True)[0]
+#     # ... (and so on for all other derivatives) ...
+#     u_z = torch.autograd.grad(u, z, grad_outputs=torch.ones_like(u), create_graph=True)[0]
+#     v_y = torch.autograd.grad(v, y, grad_outputs=torch.ones_like(v), create_graph=True)[0]
+#     v_z = torch.autograd.grad(v, z, grad_outputs=torch.ones_like(v), create_graph=True)[0]
+#     u_xx = torch.autograd.grad(u_x, x, grad_outputs=torch.ones_like(u_x), create_graph=True)[0]
+#     u_yy = torch.autograd.grad(u_y, y, grad_outputs=torch.ones_like(u_y), create_graph=True)[0]
+#     u_zz = torch.autograd.grad(u_z, z, grad_outputs=torch.ones_like(u_z), create_graph=True)[0]
+#     v_xx = torch.autograd.grad(v_x, x, grad_outputs=torch.ones_like(v_x), create_graph=True)[0]
+#     v_yy = torch.autograd.grad(v_y, y, grad_outputs=torch.ones_like(v_y), create_graph=True)[0]
+#     v_zz = torch.autograd.grad(v_z, z, grad_outputs=torch.ones_like(v_z), create_graph=True)[0]
+    
+#     lap_u = u_xx + u_yy + u_zz
+#     lap_v = v_xx + v_yy + v_zz
+#     V = V_potential(x, y, z, t)
+
+#     # The residual calculation now uses the full, correct lab-frame time derivative
+#     f_u = u_t + 0.5 * lap_v - V * v
+#     f_v = v_t - 0.5 * lap_u + V * u
+
+#     if not hasattr(pde_residual, "_dbg_res"):
+#         dbg("chain_rule",
+#             u_t_in=u_t_incomplete[:3].flatten(),
+#             corr=(-xc_dot*u_x)[:3].flatten(),
+#             u_t_lab=u_t[:3].flatten())
+#         pde_residual._dbg_res = True
+    
+#     return f_u, f_v
 
 # --- Data Sampling ---
 def sample_points():

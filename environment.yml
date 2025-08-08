@@ -1,13 +1,18 @@
-name: balls-env
+name: benv
 channels:
   - pytorch
   - nvidia
   - conda-forge
   - defaults
+channel_priority: strict 
+
 dependencies:
   - python=3.10
-  - pip
 
+  - pytorch-cuda=11.8             # meta-package (nvidia channel) chooses GPU builds
+  - pytorch=2.*=*cuda118*           # forces a CUDA-tagged build
+  - torchvision=*cuda118*                 # gets matched to the same CUDA tag
+  - torchaudio=*cuda118*  
   #Science stack
   - numpy
   - matplotlib
@@ -15,10 +20,15 @@ dependencies:
   - cma
   - scipy
 #PyTorchstack
-  - pytorch
-  - torchvision
+  - pytorch-cuda=11.8             # meta-package (nvidia channel) chooses GPU builds
+  - pytorch>=2.3=*cuda*           # forces a CUDA-tagged build
+  - torchvision                   # gets matched to the same CUDA tag
   - torchaudio
-  - pytorch-cuda=11.8
+  - pip
+
+  - pyside6           # pulls matching shiboken6
+  - rich
+  - pysocks
   - pip:
     - -e . #install my library
     - pywebview

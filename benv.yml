@@ -1,0 +1,39 @@
+# benv.yml – test build
+name: benv
+channels:
+  - pytorch
+  - nvidia          # needs to stay above conda-forge
+  - conda-forge
+  - defaults
+channel_priority: strict
+
+dependencies:
+  # Core
+  - python=3.10
+
+  # -------- GPU stack locked to CUDA 11.8 --------
+  - pytorch        =2.3.1=*cuda11.8*
+  - torchvision    =0.18.*=*cu118*
+  - torchaudio     =2.3.*=*cu118*
+  - pytorch-cuda   =11.8           # runtime libs
+
+
+
+  # --- Sci / math ---
+  - numpy
+  - scipy
+  - matplotlib
+  - imageio
+  - cma
+
+  # --- Misc libraries you actually import ---
+  - pyside6           # pulls matching shiboken6
+  - rich
+  - pysocks
+
+  # --- Pip extras (stuff Conda doesn't have) ---
+  - pip
+  - pip:
+      - -e .          # your qdotlib package
+      - pywebview
+      - streamlit

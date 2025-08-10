@@ -324,15 +324,15 @@ if __name__ == "__main__":
         A_ic_true, S_ic_true = initial_condition_A_S(x_ic, y_ic, z_ic)
 
         #FOR SIMPLIFIED IC LOSS
-        # loss_ic = torch.mean((A_ic_pred - A_ic_true)**2) + torch.mean((S_ic_pred - S_ic_true)**2)
+        loss_ic = torch.mean((A_ic_pred - A_ic_true)**2) + torch.mean((S_ic_pred - S_ic_true)**2)
 
 
         # # Create a weight function (the Gaussian itself) to focus the loss on the center
-        ic_weight = A_ic_true**2
+        # ic_weight = A_ic_true**2
         
-        loss_ic_A = torch.mean(ic_weight * (A_ic_pred - A_ic_true)**2)
-        loss_ic_S = torch.mean((S_ic_pred - S_ic_true)**2) # Phase loss doesn't need weighting
-        loss_ic = loss_ic_A + loss_ic_S
+        # loss_ic_A = torch.mean(ic_weight * (A_ic_pred - A_ic_true)**2)
+        # loss_ic_S = torch.mean((S_ic_pred - S_ic_true)**2) # Phase loss doesn't need weighting
+        # loss_ic = loss_ic_A + loss_ic_S
 
 
         # loss_ic = torch.mean((A_ic_pred - A_ic_true)**2) + torch.mean((S_ic_pred - S_ic_true)**2)

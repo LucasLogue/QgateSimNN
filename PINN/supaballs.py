@@ -322,24 +322,25 @@ if __name__ == "__main__":
 
         A_ic_pred, S_ic_pred = model.get_A_S(x_ic, y_ic, z_ic, t_ic, apply_cutoff=False)
         A_ic_true, S_ic_true = initial_condition_A_S(x_ic, y_ic, z_ic)
-        # --- FINAL ACCURACY FIX: Weighted IC Loss ---
-        # Create a weight function (the Gaussian itself) to focus the loss on the center
+
+        #FOR SIMPLIFIED IC LOSS
+        # loss_ic = torch.mean((A_ic_pred - A_ic_true)**2) + torch.mean((S_ic_pred - S_ic_true)**2)
+
+
+        # # Create a weight function (the Gaussian itself) to focus the loss on the center
         ic_weight = A_ic_true**2
         
         loss_ic_A = torch.mean(ic_weight * (A_ic_pred - A_ic_true)**2)
         loss_ic_S = torch.mean((S_ic_pred - S_ic_true)**2) # Phase loss doesn't need weighting
         loss_ic = loss_ic_A + loss_ic_S
+
+
         # loss_ic = torch.mean((A_ic_pred - A_ic_true)**2) + torch.mean((S_ic_pred - S_ic_true)**2)
         u_norm, v_norm = model(x_norm, y_norm, z_norm, t_norm)
         psi_sq_norm = u_norm**2 + v_norm**2
         norm_pred = domain_volume * torch.mean(psi_sq_norm)
         loss_norm = (norm_pred - 1.0)**2
 
-        # -----------------------------------------------------------------
-        # --- PASTE THE NEW BLOCK OF CODE HERE ---
-        # -----------------------------------------------------------------
-
-        # --- FINAL FIDELITY FIX: Phase Regularization ---
         # Get A and S at the collocation points to calculate the phase gradients
         # We use apply_cutoff=True because we're regularizing the main solution for t > 0
         A_col, S_col = model.get_A_S(x_col, y_col, z_col, t_col, apply_cutoff=True)
@@ -359,7 +360,7 @@ if __name__ == "__main__":
 
         W_PDE = get_w_pde(i, warmup_steps=warmupsteps, max_weight=60.0)
 
-        total_loss = W_PDE * loss_pde + W_IC * loss_ic + W_NORM * loss_norm + W_REG * loss_reg
+        total_loss = W_PDE * loss_pde + W_IC * loss_ic + W_NORM * loss_norm #+ W_REG * loss_reg
 
         #very working for loss being updated to line above for new fidelity test
         #total_loss = W_PDE * loss_pde + W_IC * loss_ic + W_NORM * loss_norm

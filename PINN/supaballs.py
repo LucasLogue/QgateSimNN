@@ -52,11 +52,20 @@ np.random.seed(42)
 
 # --- Configuration ---
 if CONFIG == "6-FAST":
-    NUM_ITERATIONS = 20000
+    NUM_ITERATIONS = 25000
     LEARNING_RATE = 2e-5
     N_COLLOCATION = 4096
     N_INITIAL = 2048
     N_NORM = 4096
+    LAYERS = [4] + [128] * 6 + [2]
+elif CONFIG == "6-SLOW":
+    NUM_ITERATIONS = 25000
+    LEARNING_RATE = 1e-5
+    N_COLLOCATION = 8192
+    #N_INITIAL = 2048
+    N_INITIAL = 4096
+    #N_NORM = 4096
+    N_NORM = 8192
     LAYERS = [4] + [128] * 6 + [2]
 
 # Domain boundaries
@@ -300,6 +309,17 @@ if __name__ == "__main__":
             return 0.01
         progress = min(1.0, (iteration - 1000) / warmup_steps)
         return max_weight * progress
+    def get_w_ic(iteration, num_iterations, initial_weight=150.0, final_weight=15.0):
+        """Gradually decreases the IC weight from an initial high value."""
+        # Define the point at which the decay finishes
+        decay_end_iter = int(num_iterations * 0.75)
+        
+        if iteration >= decay_end_iter:
+            return final_weight
+            
+        progress = iteration / decay_end_iter
+        # Linear interpolation from initial_weight down to final_weight
+        return initial_weight - (initial_weight - final_weight) * progress
     optimizer_adam = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     #scheduler = torch.optim.lr_scheduler.StepLR(optimizer_adam, step_size=10000, gamma=0.5)
     #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_adam, T_max=NUM_ITERATIONS, eta_min=1e-7)
@@ -323,11 +343,11 @@ if __name__ == "__main__":
         A_ic_pred, S_ic_pred = model.get_A_S(x_ic, y_ic, z_ic, t_ic, apply_cutoff=False)
         A_ic_true, S_ic_true = initial_condition_A_S(x_ic, y_ic, z_ic)
 
-        #FOR SIMPLIFIED IC LOSS
+        # #FOR SIMPLIFIED IC LOSS
         loss_ic = torch.mean((A_ic_pred - A_ic_true)**2) + torch.mean((S_ic_pred - S_ic_true)**2)
 
 
-        # # Create a weight function (the Gaussian itself) to focus the loss on the center
+        # Create a weight function (the Gaussian itself) to focus the loss on the center
         # ic_weight = A_ic_true**2
         
         # loss_ic_A = torch.mean(ic_weight * (A_ic_pred - A_ic_true)**2)
@@ -359,6 +379,7 @@ if __name__ == "__main__":
 
 
         W_PDE = get_w_pde(i, warmup_steps=warmupsteps, max_weight=60.0)
+        w_ic = get_w_ic(i, num_iterations=NUM_ITERATIONS, initial_weight=150.0, final_weight=15.0)
 
         total_loss = W_PDE * loss_pde + W_IC * loss_ic + W_NORM * loss_norm #+ W_REG * loss_reg
 

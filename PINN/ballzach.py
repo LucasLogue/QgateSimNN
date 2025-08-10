@@ -29,6 +29,7 @@ from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
 import time
 import os
+CONFIG = "6-FAST"
 
 # ---------- DEBUG HELPER ----------
 def dbg(tag, **vals):
@@ -50,6 +51,23 @@ torch.manual_seed(42)
 np.random.seed(42)
 
 # --- Configuration ---
+if CONFIG == "6-FAST":
+    NUM_ITERATIONS = 25000
+    LEARNING_RATE = 2e-5
+    N_COLLOCATION = 4096
+    N_INITIAL = 2048
+    N_NORM = 4096
+    LAYERS = [4] + [128] * 6 + [2]
+elif CONFIG == "6-SLOW":
+    NUM_ITERATIONS = 25000
+    LEARNING_RATE = 1e-5
+    N_COLLOCATION = 8192
+    #N_INITIAL = 2048
+    N_INITIAL = 4096
+    #N_NORM = 4096
+    N_NORM = 8192
+    LAYERS = [4] + [128] * 6 + [2]
+
 # Domain boundaries
 #X_MIN, X_MAX = -5.0, 5.0
 X_MIN, X_MAX = -10.0, 10.0 
@@ -58,24 +76,43 @@ Z_MIN, Z_MAX = -5.0, 5.0
 T_MIN, T_MAX = 0.0, 3.0
 
 # Spatial domain length for cutoff function
-L = 10.0
+L = 5.0
 
 # Hyperparameters
-LEARNING_RATE = 2e-5
-NUM_ITERATIONS = 15000 # Let's give this promising architecture a good run
+# # FUTURE !! HYPERPARAMETERS FOR A HIGH-FIDELITY RUN
+# # 1. More Power: A deeper and wider network
+# LAYERS = [4] + [256] * 8 + [2]
+# # 2. More Data: 4x the training points
+# N_COLLOCATION = 16384
+# N_INITIAL = 4096
+# N_NORM = 16384
+# # 3. More Time: 5x the training iterations
+# NUM_ITERATIONS = 50000
+# #!!!!!!!!!!!!!!!!!!!!!!!!!!
 
-N_COLLOCATION = 4096
-N_INITIAL = 2048
-N_NORM = 4096
 
+
+
+# LEARNING_RATE = 1e-5
+#NUM_ITERATIONS = 10000 # Let's give this promising architecture a good run
+# NUM_ITERATIONS = 50000
+#N_COLLOCATION = 4096
+#N_COLLOCATION = 8192
+# N_COLLOCATION = 16384
+#N_INITIAL = 2048
+#N_INITIAL = 4096
+# N_INITIAL = 8192
+#N_NORM = 4096
+#N_NORM = 16384
+# N_NORM = 32768
 # Loss weights
 W_PDE = 60.0
 W_IC = 15.0
 W_NORM = 80.0
 
 # Network architecture
-LAYERS = [4] + [128] * 6 + [2]
-
+# LAYERS = [4] + [128] * 6 + [2]
+# LAYERS = [4] + [256] * 8 + [2]
 # --- Pre-compute Classical Trajectory ---
 def classical_ode(t, state):
     x, p = state
@@ -103,7 +140,7 @@ def get_Xc(t):
     out = Xc_t[indices].unsqueeze(-1)
     if not hasattr(get_Xc, "_flag"):
         dbg("Xc_lookup", sample_t=t[:3].flatten(), Xc_sample=out[:3].flatten())
-        get_Xc._flag = True
+        get_Xc._flag = False
     return out
 
 def get_Xc_dot(t):
@@ -112,7 +149,7 @@ def get_Xc_dot(t):
     out = Xc_dot_t[indices].unsqueeze(-1)
     if not hasattr(get_Xc, "_flag"):
         dbg("Xc_lookup", sample_t=t[:3].flatten(), Xc_sample=out[:3].flatten())
-        get_Xc._flag = True
+        get_Xc._flag = False
     return out
 
 
@@ -134,13 +171,10 @@ def initial_condition_A_S(x, y, z):
     return A0, S0
 
 # --- Neural Network Model ---
+# --- FINAL, OPTIMIZED PINN CLASS ---
+# --- The Final, Correct, and Consistent PINN Class ---
+# --- FINAL, CORRECTED PINN CLASS ---
 class PINN(nn.Module):
-    """
-    PINN in a co-moving frame of reference.
-    The network learns the wavefunction's shape relative to its classical center.
-    ψ(x,y,z,t) = cutoff(x',y,z) * A(x',y,z,t) * exp(i*S(x',y,z,t))
-    where x' = x - Xc(t)
-    """
     def __init__(self, layers):
         super(PINN, self).__init__()
         self.net = self.build_net(layers)
@@ -153,31 +187,25 @@ class PINN(nn.Module):
                 net_layers.append(nn.Tanh())
         return nn.Sequential(*net_layers)
 
-    def forward(self, x, y, z, t):
-        # Transform to the co-moving frame
+    def _forward_base(self, x, y, z, t):
         x_prime = x - get_Xc(t)
-        if not hasattr(self, "_dbg_fwd"):
-            dbg("forward",
-                x_sample=x[:3].flatten(),
-                Xc_sample=get_Xc(t)[:3].flatten(),
-                x_prime=x_prime[:3].flatten())
-            self._dbg_fwd = True
-        
-        # Normalize inputs for stability
         x_prime_norm = x_prime / L
         y_norm = y / L
         z_norm = z / L
         t_norm = 2.0 * (t - T_MIN) / (T_MAX - T_MIN) - 1.0
         
         inputs = torch.cat([x_prime_norm, y_norm, z_norm, t_norm], dim=1)
-        
         nn_output = self.net(inputs)
+        
         A_raw = nn_output[:, 0:1]
-        S_raw = nn_output[:, 1:2]
+        S_raw = nn_output[:, 1:2] # The NN now learns the full phase S
         
-        # Cutoff function is also in the moving frame
+        return A_raw, S_raw, x_prime, y_norm, z_norm
+
+    def forward(self, x, y, z, t):
+        A_raw, S_raw, x_prime, y_norm, z_norm = self._forward_base(x, y, z, t)
+        
         cutoff = (1 - (x_prime / L)**2) * (1 - y_norm**2) * (1 - z_norm**2)
-        
         A = cutoff * A_raw
         S = S_raw
         
@@ -186,137 +214,56 @@ class PINN(nn.Module):
         
         return u, v
     
-    def get_A_S(self, x, y, z, t):
-        """Helper function to get A and S directly for the IC loss."""
-        x_prime = x - get_Xc(t)
-        x_prime_norm = x_prime / L
-        y_norm = y / L
-        z_norm = z / L
-        t_norm = 2.0 * (t - T_MIN) / (T_MAX - T_MIN) - 1.0
-        inputs = torch.cat([x_prime_norm, y_norm, z_norm, t_norm], dim=1)
-        nn_output = self.net(inputs)
-        A_raw = nn_output[:, 0:1]
-        S_raw = nn_output[:, 1:2]
-        cutoff = (1 - (x_prime / L)**2) * (1 - y_norm**2) * (1 - z_norm**2)
-        A = cutoff * A_raw
+    def get_A_S(self, x, y, z, t, apply_cutoff=True):
+        A_raw, S_raw, x_prime, y_norm, z_norm = self._forward_base(x, y, z, t)
+        
+        if apply_cutoff:
+            cutoff = (1 - (x_prime / L)**2) * (1 - y_norm**2) * (1 - z_norm**2)
+            A = cutoff * A_raw
+        else:
+            A = A_raw
+        
         S = S_raw
         return A, S
 
 
-# class PINN(nn.Module):
-#     """
-#     PINN in a co-moving frame of reference.
-#     The network learns the wavefunction's shape relative to its classical center.
-#     ψ(x,y,z,t) = cutoff(x',y,z) * A(x',y,z,t) * exp(i*S(x',y,z,t))
-#     where x' = x - Xc(t)
-#     """
-#     def __init__(self, layers):
-#         super(PINN, self).__init__()
-#         self.net = self.build_net(layers)
-
-#     def build_net(self, layers):
-#         net_layers = []
-#         for i in range(len(layers) - 1):
-#             net_layers.append(nn.Linear(layers[i], layers[i+1]))
-#             if i < len(layers) - 2:
-#                 net_layers.append(nn.Tanh())
-#         return nn.Sequential(*net_layers)
-
-#     # --- NEW: Internal method to avoid duplicate work ---
-#     def _forward_base(self, x, y, z, t):
-#         """Performs the core forward pass shared by other methods."""
-#         x_prime = x - get_Xc(t)
-        
-#         # Normalize inputs for stability
-#         x_prime_norm = x_prime / L
-#         y_norm = y / L
-#         z_norm = z / L
-#         t_norm = 2.0 * (t - T_MIN) / (T_MAX - T_MIN) - 1.0
-        
-#         inputs = torch.cat([x_prime_norm, y_norm, z_norm, t_norm], dim=1)
-#         nn_output = self.net(inputs)
-        
-#         A_raw = nn_output[:, 0:1]
-#         S_raw = nn_output[:, 1:2]
-        
-#         return A_raw, S_raw, x_prime, y_norm, z_norm
-
-#     def forward(self, x, y, z, t):
-#         # Call the shared base method
-#         A_raw, S_raw, x_prime, y_norm, z_norm = self._forward_base(x, y, z, t)
-        
-#         # Perform the final calculations for u and v
-#         cutoff = (1 - (x_prime / L)**2) * (1 - y_norm**2) * (1 - z_norm**2)
-#         A = cutoff * A_raw
-#         S = S_raw
-        
-#         u = A * torch.cos(S)
-#         v = A * torch.sin(S)
-        
-#         return u, v
-    
-#     def get_A_S(self, x, y, z, t):
-#         # Call the shared base method
-#         A_raw, S_raw, x_prime, y_norm, z_norm = self._forward_base(x, y, z, t)
-        
-#         # Perform the final calculations for A and S
-#         cutoff = (1 - (x_prime / L)**2) * (1 - y_norm**2) * (1 - z_norm**2)
-#         A = cutoff * A_raw
-#         S = S_raw
-        
-#         return A, S
-
-# --- Loss Calculation ---
-
-# --- Loss Calculation ---
 def pde_residual(model, x, y, z, t):
-    """Calculate the residual of the Schrödinger PDE."""
+    """Calculate the residual of the Schrödinger PDE (Optimized)."""
     x.requires_grad_(True); y.requires_grad_(True); z.requires_grad_(True); t.requires_grad_(True)
+    
     u, v = model(x, y, z, t)
 
-    # u_t and v_t from autograd are INCOMPLETE because the gradient path through get_Xc is broken.
-    # They represent the change in psi within the moving frame (∂ψ/∂t_moving).
-    u_t_incomplete = torch.autograd.grad(u, t, grad_outputs=torch.ones_like(u), create_graph=True)[0]
-    v_t_incomplete = torch.autograd.grad(v, t, grad_outputs=torch.ones_like(v), create_graph=True)[0]
-    
-    u_x = torch.autograd.grad(u, x, grad_outputs=torch.ones_like(u), create_graph=True)[0]
-    v_x = torch.autograd.grad(v, x, grad_outputs=torch.ones_like(v), create_graph=True)[0]
+    # --- Bundle derivative calculations for u ---
+    # Calculate all first-order derivatives of u in one go
+    u_grads = torch.autograd.grad(u, [x, y, z, t], grad_outputs=torch.ones_like(u), create_graph=True)
+    u_x, u_y, u_z, u_t_incomplete = u_grads[0], u_grads[1], u_grads[2], u_grads[3]
 
-    # Manually add the missing part of the chain rule to get the full lab-frame time derivative.
-    # ∂ψ/∂t_lab = ∂ψ/∂t_moving + Xc_dot * ∂ψ/∂x
-    xc_dot = get_Xc_dot(t)
-    u_t = u_t_incomplete - xc_dot * u_x
-    v_t = v_t_incomplete - xc_dot * v_x
-
-    # The rest of the calculation proceeds as before
-    u_y = torch.autograd.grad(u, y, grad_outputs=torch.ones_like(u), create_graph=True)[0]
-    # ... (and so on for all other derivatives) ...
-    u_z = torch.autograd.grad(u, z, grad_outputs=torch.ones_like(u), create_graph=True)[0]
-    v_y = torch.autograd.grad(v, y, grad_outputs=torch.ones_like(v), create_graph=True)[0]
-    v_z = torch.autograd.grad(v, z, grad_outputs=torch.ones_like(v), create_graph=True)[0]
+    # Calculate second-order derivatives from the first-order ones
     u_xx = torch.autograd.grad(u_x, x, grad_outputs=torch.ones_like(u_x), create_graph=True)[0]
     u_yy = torch.autograd.grad(u_y, y, grad_outputs=torch.ones_like(u_y), create_graph=True)[0]
     u_zz = torch.autograd.grad(u_z, z, grad_outputs=torch.ones_like(u_z), create_graph=True)[0]
+    lap_u = u_xx + u_yy + u_zz
+
+    # --- Bundle derivative calculations for v ---
+    v_grads = torch.autograd.grad(v, [x, y, z, t], grad_outputs=torch.ones_like(v), create_graph=True)
+    v_x, v_y, v_z, v_t_incomplete = v_grads[0], v_grads[1], v_grads[2], v_grads[3]
+
     v_xx = torch.autograd.grad(v_x, x, grad_outputs=torch.ones_like(v_x), create_graph=True)[0]
     v_yy = torch.autograd.grad(v_y, y, grad_outputs=torch.ones_like(v_y), create_graph=True)[0]
     v_zz = torch.autograd.grad(v_z, z, grad_outputs=torch.ones_like(v_z), create_graph=True)[0]
-    
-    lap_u = u_xx + u_yy + u_zz
     lap_v = v_xx + v_yy + v_zz
-    V = V_potential(x, y, z, t)
 
-    # The residual calculation now uses the full, correct lab-frame time derivative
+    # --- Apply chain rule and compute residuals (no changes here) ---
+    xc_dot = get_Xc_dot(t)
+    u_t = u_t_incomplete - xc_dot * u_x
+    v_t = v_t_incomplete - xc_dot * v_x
+    
+    V = V_potential(x, y, z, t)
     f_u = u_t + 0.5 * lap_v - V * v
     f_v = v_t - 0.5 * lap_u + V * u
-
-    if not hasattr(pde_residual, "_dbg_res"):
-        dbg("chain_rule",
-            u_t_in=u_t_incomplete[:3].flatten(),
-            corr=(-xc_dot*u_x)[:3].flatten(),
-            u_t_lab=u_t[:3].flatten())
-        pde_residual._dbg_res = True
     
     return f_u, f_v
+
 
 # --- Data Sampling ---
 def sample_points():
@@ -351,7 +298,7 @@ if __name__ == "__main__":
     model = PINN(layers=LAYERS).to(device)
     #model = torch.compile(model)
 
-    # STAGE 1: ADAM FOR EXPLORATION (14,000 iterations)
+    # STAGE 1: ADAM FOR EXPLORATION 
     # ----------------------------------------------------
     warmupfrac = 0.3
     warmupsteps = int(NUM_ITERATIONS*warmupfrac)
@@ -363,8 +310,10 @@ if __name__ == "__main__":
         progress = min(1.0, (iteration - 1000) / warmup_steps)
         return max_weight * progress
     optimizer_adam = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer_adam, step_size=10000, gamma=0.5)
-
+    #scheduler = torch.optim.lr_scheduler.StepLR(optimizer_adam, step_size=10000, gamma=0.5)
+    #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer_adam, T_max=NUM_ITERATIONS, eta_min=1e-7)
+    # Keep LR high for 80% of the run, then drop it sharply for the final fine-tuning.
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer_adam, step_size=int(NUM_ITERATIONS * 0.8), gamma=0.1)
     domain_volume = (X_MAX - X_MIN) * (Y_MAX - Y_MIN) * (Z_MAX - Z_MIN)
 
     print("--- Starting Training (Co-Moving Frame Model) ---")
@@ -380,37 +329,67 @@ if __name__ == "__main__":
         f_u, f_v = pde_residual(model, x_col, y_col, z_col, t_col)
         loss_pde = torch.mean(f_u**2) + torch.mean(f_v**2)
 
-        A_ic_pred, S_ic_pred = model.get_A_S(x_ic, y_ic, z_ic, t_ic)
+        A_ic_pred, S_ic_pred = model.get_A_S(x_ic, y_ic, z_ic, t_ic, apply_cutoff=False)
         A_ic_true, S_ic_true = initial_condition_A_S(x_ic, y_ic, z_ic)
+
+        # #FOR SIMPLIFIED IC LOSS
         loss_ic = torch.mean((A_ic_pred - A_ic_true)**2) + torch.mean((S_ic_pred - S_ic_true)**2)
+
+
+        # Create a weight function (the Gaussian itself) to focus the loss on the center
+        # ic_weight = A_ic_true**2
         
-        # t_norm_slice = torch.rand(1, 1, device=device) * T_MAX
-        # x_norm = torch.rand(N_NORM, 1, device=device) * (X_MAX - X_MIN) + X_MIN
-        # y_norm = torch.rand(N_NORM, 1, device=device) * (Y_MAX - Y_MIN) + Y_MIN
-        # z_norm = torch.rand(N_NORM, 1, device=device) * (Z_MAX - Z_MIN) + Z_MIN
-        # t_norm = t_norm_slice.expand(N_NORM, 1)
+        # loss_ic_A = torch.mean(ic_weight * (A_ic_pred - A_ic_true)**2)
+        # loss_ic_S = torch.mean((S_ic_pred - S_ic_true)**2) # Phase loss doesn't need weighting
+        # loss_ic = loss_ic_A + loss_ic_S
+
+
+        # loss_ic = torch.mean((A_ic_pred - A_ic_true)**2) + torch.mean((S_ic_pred - S_ic_true)**2)
         u_norm, v_norm = model(x_norm, y_norm, z_norm, t_norm)
         psi_sq_norm = u_norm**2 + v_norm**2
         norm_pred = domain_volume * torch.mean(psi_sq_norm)
         loss_norm = (norm_pred - 1.0)**2
 
+        # Get A and S at the collocation points to calculate the phase gradients
+        # We use apply_cutoff=True because we're regularizing the main solution for t > 0
+        A_col, S_col = model.get_A_S(x_col, y_col, z_col, t_col, apply_cutoff=True)
+        
+        # Calculate the spatial gradients of the phase
+        S_grads = torch.autograd.grad(S_col, [x_col, y_col, z_col], grad_outputs=torch.ones_like(S_col), create_graph=True)
+        S_x, S_y, S_z = S_grads[0], S_grads[1], S_grads[2]
+        
+        # The new loss term penalizes the magnitude of the phase gradients to enforce smoothness
+        loss_reg = torch.mean(S_x**2) + torch.mean(S_y**2) + torch.mean(S_z**2)
+        
+        # Add a small weight for this regularization term
+        W_REG = 0.01
+        # --- End of New Block ---
+        # -----------------------------------------------------------------
+
+
         W_PDE = get_w_pde(i, warmup_steps=warmupsteps, max_weight=60.0)
 
-        total_loss = W_PDE * loss_pde + W_IC * loss_ic + W_NORM * loss_norm
+        total_loss = W_PDE * loss_pde + W_IC * loss_ic + W_NORM * loss_norm + W_REG * loss_reg
+
+        #very working for loss being updated to line above for new fidelity test
+        #total_loss = W_PDE * loss_pde + W_IC * loss_ic + W_NORM * loss_norm
         
         total_loss.backward()
         optimizer_adam.step()
         scheduler.step()
-
-        # if i % 500 == 0:
-        #     print(f"Adam Iter: {i:6d}, Loss: {total_loss.item():.3e}, "
-        #           f"PDE: {loss_pde.item():.3e}, IC: {loss_ic.item():.3e}, Norm: {loss_norm.item():.3e}")
         if i % 500 == 0:
             # centre-of-mass in the *lab* frame for this batch
-            x_lab_mean = (u_norm**2 + v_norm**2).mean()  # weighted later, fine for trend
+            x_lab_mean = (u_norm**2 + v_norm**2).squeeze()  # weighted later, fine for trend
+            #print((x_norm.squeeze()).min(), x_norm.squeeze().max())
+            ballslol = x_norm.squeeze()
+            x_cm_batch = (ballslol * x_lab_mean).sum() / x_lab_mean.sum()
+            #psisq = (u_norm**2 )
             dbg("iter", step=i, loss=total_loss.item(), PDE=loss_pde.item(),
-                x_cm_batch=float((x_norm.squeeze()).mean()),
+                x_cm_batch=x_cm_batch,
                 norm=float(norm_pred))
+            
+
+    #Stage 2 Optimizer disabled rn cause it sucks dick
     print("\n--- Starting Stage 2: L-BFGS Optimizer ---")
     optimizer_lbfgs = torch.optim.LBFGS(
         model.parameters(),
@@ -420,19 +399,12 @@ if __name__ == "__main__":
         history_size=100,
         line_search_fn="strong_wolfe" # A robust line search algorithm
     )
-
     # L-BFGS requires a 'closure' function that it can call multiple times
-
     (x_col_lbfgs, y_col_lbfgs, z_col_lbfgs, t_col_lbfgs,
     x_ic_lbfgs,  y_ic_lbfgs,  z_ic_l_lbfgs,  t_ic_lbfgs,
     x_norm_lbfgs, y_norm_lbfgs, z_norm_lbfgs, t_norm_lbfgs) = sample_points()
     def closure():
         optimizer_lbfgs.zero_grad()
-        
-        # # We use the same collocation points for this step for stability
-        # (x_col, y_col, z_col, t_col,
-        # x_ic,  y_ic,  z_ic,  t_ic,
-        # x_norm, y_norm, z_norm, t_norm) = sample_points()
 
 
         f_u, f_v = pde_residual(model, x_col_lbfgs, y_col_lbfgs, z_col_lbfgs, t_col_lbfgs)
@@ -441,12 +413,6 @@ if __name__ == "__main__":
         A_ic_pred, S_ic_pred = model.get_A_S(x_ic_lbfgs, y_ic_lbfgs, z_ic_l_lbfgs, t_ic_lbfgs)
         A_ic_true, S_ic_true = initial_condition_A_S(x_ic_lbfgs, y_ic_lbfgs, z_ic_l_lbfgs)
         loss_ic = torch.mean((A_ic_pred - A_ic_true)**2) + torch.mean((S_ic_pred - S_ic_true)**2)
-        
-        # t_norm_slice = torch.rand(1, 1, device=device) * T_MAX
-        # x_norm = torch.rand(N_NORM, 1, device=device) * (X_MAX - X_MIN) + X_MIN
-        # y_norm = torch.rand(N_NORM, 1, device=device) * (Y_MAX - Y_MIN) + Y_MIN
-        # z_norm = torch.rand(N_NORM, 1, device=device) * (Z_MAX - Z_MIN) + Z_MIN
-        # t_norm = t_norm_slice.expand(N_NORM, 1)
         u_norm, v_norm = model(x_norm_lbfgs, y_norm_lbfgs, z_norm_lbfgs, t_norm_lbfgs)
         psi_sq_norm = u_norm**2 + v_norm**2
         norm_pred = domain_volume * torch.mean(psi_sq_norm)
@@ -457,11 +423,8 @@ if __name__ == "__main__":
         total_loss.backward()
         print(f"L-BFGS Loss: {total_loss.item():.3e}")
         return total_loss
-
     # Run the L-BFGS optimizer
     #optimizer_lbfgs.step(closure)
-
-    print("Training finished.")
 
     print("Training finished.")
 
@@ -510,8 +473,8 @@ if __name__ == "__main__":
         u_pred, v_pred = model(x_flat, y_flat, z_flat, t_final_flat)
         psi_pred_sq = (u_pred**2 + v_pred**2).reshape(N_grid, N_grid).cpu().numpy()
 
-    #x_shift_final = Xc_func(T_MAX)
-    #print(f"Corrected classical x-shift at t={T_MAX}: {x_shift_final:.4f}")
+    x_shift_final = Xc_func(T_MAX)
+    print(f"Corrected classical x-shift at t={T_MAX}: {x_shift_final:.4f}")
 
     print("\n--- Quantitative Sanity Check ---")
     with torch.no_grad():

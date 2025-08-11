@@ -29,7 +29,11 @@ from scipy.integrate import solve_ivp
 from scipy.interpolate import interp1d
 import time
 import os
-CONFIG = "6-FAST"
+
+#CONFIGURATION SELECTOR=============================================================
+# CONFIG = "6-FAST" #10000epoch, small grid
+# CONFIG = "6-SLOW" #25000 epoch, bigger grid
+CONFIG = "6-MID" #20000 epoch, small grid
 
 # ---------- DEBUG HELPER ----------
 def dbg(tag, **vals):
@@ -50,9 +54,17 @@ print(f"Using device: {device}")
 torch.manual_seed(42)
 np.random.seed(42)
 
-# --- Configuration ---
+
+#CONFIGURATION SETUP======================================
 if CONFIG == "6-FAST":
-    NUM_ITERATIONS = 25000
+    NUM_ITERATIONS = 10000
+    LEARNING_RATE = 2e-5
+    N_COLLOCATION = 4096
+    N_INITIAL = 2048
+    N_NORM = 4096
+    LAYERS = [4] + [128] * 6 + [2]
+elif CONFIG == "6-MID":
+    NUM_ITERATIONS = 15000
     LEARNING_RATE = 2e-5
     N_COLLOCATION = 4096
     N_INITIAL = 2048
@@ -62,9 +74,7 @@ elif CONFIG == "6-SLOW":
     NUM_ITERATIONS = 25000
     LEARNING_RATE = 1e-5
     N_COLLOCATION = 8192
-    #N_INITIAL = 2048
     N_INITIAL = 4096
-    #N_NORM = 4096
     N_NORM = 8192
     LAYERS = [4] + [128] * 6 + [2]
 
@@ -78,34 +88,7 @@ T_MIN, T_MAX = 0.0, 3.0
 # Spatial domain length for cutoff function
 L = 5.0
 
-# Hyperparameters
-# # FUTURE !! HYPERPARAMETERS FOR A HIGH-FIDELITY RUN
-# # 1. More Power: A deeper and wider network
-# LAYERS = [4] + [256] * 8 + [2]
-# # 2. More Data: 4x the training points
-# N_COLLOCATION = 16384
-# N_INITIAL = 4096
-# N_NORM = 16384
-# # 3. More Time: 5x the training iterations
-# NUM_ITERATIONS = 50000
-# #!!!!!!!!!!!!!!!!!!!!!!!!!!
-
-
-
-
-# LEARNING_RATE = 1e-5
-#NUM_ITERATIONS = 10000 # Let's give this promising architecture a good run
-# NUM_ITERATIONS = 50000
-#N_COLLOCATION = 4096
-#N_COLLOCATION = 8192
-# N_COLLOCATION = 16384
-#N_INITIAL = 2048
-#N_INITIAL = 4096
-# N_INITIAL = 8192
-#N_NORM = 4096
-#N_NORM = 16384
-# N_NORM = 32768
-# Loss weights
+#INITIAL WEIGHTS
 W_PDE = 60.0
 W_IC = 15.0
 W_NORM = 80.0
@@ -170,10 +153,7 @@ def initial_condition_A_S(x, y, z):
     S0 = torch.zeros_like(A0)
     return A0, S0
 
-# --- Neural Network Model ---
-# --- FINAL, OPTIMIZED PINN CLASS ---
-# --- The Final, Correct, and Consistent PINN Class ---
-# --- FINAL, CORRECTED PINN CLASS ---
+#=====================PINNNNN MODELL!!!==============================
 class PINN(nn.Module):
     def __init__(self, layers):
         super(PINN, self).__init__()
@@ -225,8 +205,10 @@ class PINN(nn.Module):
         
         S = S_raw
         return A, S
+#=================END OF PINN MODEL=========================
 
 
+#==========Training Functions================================
 def pde_residual(model, x, y, z, t):
     """Calculate the residual of the Schrödinger PDE (Optimized)."""
     x.requires_grad_(True); y.requires_grad_(True); z.requires_grad_(True); t.requires_grad_(True)
@@ -265,7 +247,7 @@ def pde_residual(model, x, y, z, t):
     return f_u, f_v
 
 
-# --- Data Sampling ---
+#===================DATASAMPLING_=======================================
 def sample_points():
     """
     Draw collocation / IC / normalisation points *uniformly in the co-moving frame*.
@@ -293,13 +275,61 @@ def sample_points():
 
     return x_col, y_col, z_col, t_col, x_ic, y_ic, z_ic, t_ic, x_norm, y_norm, z_norm, t_norm
 
-# --- Main Training Loop ---
+
+#Final anaylsis check
+def run_final_analysis(model):
+    """
+    Runs a high-resolution analysis of the final trained model to calculate
+    fidelity and the center of mass at t=3.0.
+    """
+    print("\n--- FINAL MODEL ANALYSIS --- 🔎")
+    model.eval()
+    with torch.no_grad():
+        # 1. Define a high-resolution grid for the final calculation
+        N_FINAL_GRID = 4096
+        classical_center = Xc_func(T_MAX).item()
+        
+        # Define the evaluation domain around the final classical center
+        EVAL_X_MIN = classical_center - L
+        EVAL_X_MAX = classical_center + L
+        
+        x_line = torch.linspace(EVAL_X_MIN, EVAL_X_MAX, N_FINAL_GRID, device=device).unsqueeze(1)
+        y0_line = torch.zeros_like(x_line)
+        z0_line = torch.zeros_like(x_line)
+        t_final_line = torch.full_like(x_line, T_MAX)
+
+        # 2. Get the PINN's predicted wavefunction
+        u_pred, v_pred = model(x_line, y0_line, z0_line, t_final_line)
+        psi_pinn = u_pred + 1j * v_pred
+
+        # 3. Get the true analytical wavefunction at the final position
+        norm_factor = (1.0 / np.pi)**(0.75)
+        x_shifted = x_line - classical_center
+        psi_analytic = norm_factor * torch.exp(-0.5 * (x_shifted**2))
+
+        # 4. Calculate Fidelity and Center of Mass (<x>)
+        dx = (EVAL_X_MAX - EVAL_X_MIN) / (N_FINAL_GRID - 1)
+        
+        # Fidelity
+        inner_product = torch.sum(torch.conj(psi_analytic) * psi_pinn) * dx
+        norm_pinn_sq = torch.sum(torch.abs(psi_pinn)**2) * dx
+        norm_analytic_sq = torch.sum(torch.abs(psi_analytic)**2) * dx
+        fidelity = (torch.abs(inner_product)**2) / (norm_pinn_sq * norm_analytic_sq)
+        
+        # Center of Mass
+        numerator = torch.sum(x_line * torch.abs(psi_pinn)**2) * dx
+        pinn_center = numerator / norm_pinn_sq
+
+        # 5. Print the final results
+        print(f"  - Final Fidelity      : {fidelity.item():.4f}")
+        print(f"  - Final PINN Center <x>: {pinn_center.item():.4f}")
+        print(f"  - Target Center        : {classical_center:.4f}")
+        print("--------------------------")
+
+#==============MAIN TRAINING ================ MAIN TRAINING================= MAIN TRIANING====
 if __name__ == "__main__":
     model = PINN(layers=LAYERS).to(device)
     #model = torch.compile(model)
-
-    # STAGE 1: ADAM FOR EXPLORATION 
-    # ----------------------------------------------------
     warmupfrac = 0.3
     warmupsteps = int(NUM_ITERATIONS*warmupfrac)
     print("--- Starting Stage 1: Adam Optimizer ---")
@@ -309,7 +339,7 @@ if __name__ == "__main__":
             return 0.01
         progress = min(1.0, (iteration - 1000) / warmup_steps)
         return max_weight * progress
-    def get_w_ic(iteration, num_iterations, initial_weight=150.0, final_weight=15.0):
+    def get_w_ic(iteration, num_iterations, initial_weight=150.0, final_weight=20.0):
         """Gradually decreases the IC weight from an initial high value."""
         # Define the point at which the decay finishes
         decay_end_iter = int(num_iterations * 0.75)
@@ -373,15 +403,12 @@ if __name__ == "__main__":
         loss_reg = torch.mean(S_x**2) + torch.mean(S_y**2) + torch.mean(S_z**2)
         
         # Add a small weight for this regularization term
-        W_REG = 0.01
-        # --- End of New Block ---
-        # -----------------------------------------------------------------
-
+        W_REG = 0.0
 
         W_PDE = get_w_pde(i, warmup_steps=warmupsteps, max_weight=60.0)
-        w_ic = get_w_ic(i, num_iterations=NUM_ITERATIONS, initial_weight=150.0, final_weight=15.0)
+        w_ic = get_w_ic(i, num_iterations=NUM_ITERATIONS, initial_weight=150.0, final_weight=W_IC)
 
-        total_loss = W_PDE * loss_pde + W_IC * loss_ic + W_NORM * loss_norm #+ W_REG * loss_reg
+        total_loss = W_PDE * loss_pde + w_ic * loss_ic + W_NORM * loss_norm #+ W_REG * loss_reg
 
         #very working for loss being updated to line above for new fidelity test
         #total_loss = W_PDE * loss_pde + W_IC * loss_ic + W_NORM * loss_norm
@@ -401,43 +428,74 @@ if __name__ == "__main__":
                 norm=float(norm_pred))
             
 
-    #Stage 2 Optimizer disabled rn cause it sucks dick
-    print("\n--- Starting Stage 2: L-BFGS Optimizer ---")
-    optimizer_lbfgs = torch.optim.LBFGS(
-        model.parameters(),
-        lr=0.1,  # L-BFGS often works well with a higher learning rate
-        max_iter=1000,
-        max_eval=1250,
-        history_size=100,
-        line_search_fn="strong_wolfe" # A robust line search algorithm
-    )
-    # L-BFGS requires a 'closure' function that it can call multiple times
-    (x_col_lbfgs, y_col_lbfgs, z_col_lbfgs, t_col_lbfgs,
-    x_ic_lbfgs,  y_ic_lbfgs,  z_ic_l_lbfgs,  t_ic_lbfgs,
-    x_norm_lbfgs, y_norm_lbfgs, z_norm_lbfgs, t_norm_lbfgs) = sample_points()
-    def closure():
-        optimizer_lbfgs.zero_grad()
+    #======================= END OF TRAINING SCRIPT======================
+    #==============DEBUGGING, PRINTS AND SAVING BELOW
+    def debug_final_time_state(model, domain_volume):
+        """
+        Performs a detailed diagnostic of the model's state at t=T_MAX.
+        """
+        print("\n--- STARTING DEBUG ANALYSIS AT T_MAX = 3.0 ---")
+        model.eval()  # Set the model to evaluation mode
 
+        # --- 1. Get the Frame's Coordinates at t=3 ---
+        xc_final = Xc_func(T_MAX)
+        print(f"\n[DEBUG 1/3] Classical Frame Center Xc(t=3): {xc_final:.4f}")
 
-        f_u, f_v = pde_residual(model, x_col_lbfgs, y_col_lbfgs, z_col_lbfgs, t_col_lbfgs)
-        loss_pde = torch.mean(f_u**2) + torch.mean(f_v**2)
+        # Create a batch of points specifically at t=3 for testing
+        N_DEBUG = 4096  # Number of points for our debug batch
+        t_debug = torch.full((N_DEBUG, 1), T_MAX, device=device)
 
-        A_ic_pred, S_ic_pred = model.get_A_S(x_ic_lbfgs, y_ic_lbfgs, z_ic_l_lbfgs, t_ic_lbfgs)
-        A_ic_true, S_ic_true = initial_condition_A_S(x_ic_lbfgs, y_ic_lbfgs, z_ic_l_lbfgs)
-        loss_ic = torch.mean((A_ic_pred - A_ic_true)**2) + torch.mean((S_ic_pred - S_ic_true)**2)
-        u_norm, v_norm = model(x_norm_lbfgs, y_norm_lbfgs, z_norm_lbfgs, t_norm_lbfgs)
-        psi_sq_norm = u_norm**2 + v_norm**2
-        norm_pred = domain_volume * torch.mean(psi_sq_norm)
-        loss_norm = (norm_pred - 1.0)**2
+        # Sample spatial points consistent with the co-moving frame
+        x_prime_debug = (torch.rand(N_DEBUG, 1, device=device) * 2 * L) - L
+        x_debug = x_prime_debug + get_Xc(t_debug)
+        y_debug = (torch.rand(N_DEBUG, 1, device=device) * (Y_MAX - Y_MIN)) + Y_MIN
+        z_debug = (torch.rand(N_DEBUG, 1, device=device) * (Z_MAX - Z_MIN)) + Z_MIN
 
-        total_loss = W_PDE * loss_pde + W_IC * loss_ic + W_NORM * loss_norm
-        
-        total_loss.backward()
-        print(f"L-BFGS Loss: {total_loss.item():.3e}")
-        return total_loss
-    # Run the L-BFGS optimizer
-    #optimizer_lbfgs.step(closure)
+        # --- 2. Get the values of weights * losses at t=3 ---
+        # Note: We can't calculate IC loss, as it's only defined at t=0.
 
+        # Calculate PDE loss at t=3
+        f_u_t3, f_v_t3 = pde_residual(model, x_debug, y_debug, z_debug, t_debug)
+        loss_pde_t3 = torch.mean(f_u_t3**2) + torch.mean(f_v_t3**2)
+
+        # Calculate Norm loss at t=3
+        with torch.no_grad():
+            u_norm_t3, v_norm_t3 = model(x_debug, y_debug, z_debug, t_debug)
+            psi_sq_norm_t3 = u_norm_t3**2 + v_norm_t3**2
+            norm_pred_t3 = domain_volume * torch.mean(psi_sq_norm_t3)
+            loss_norm_t3 = (norm_pred_t3 - 1.0)**2
+            
+            # Get final loss weights
+            final_W_PDE = get_w_pde(NUM_ITERATIONS)
+            final_W_IC = get_w_ic(NUM_ITERATIONS, num_iterations=NUM_ITERATIONS) # You were using w_ic not W_IC
+            final_W_NORM = W_NORM # W_NORM is constant in your script
+
+            print("\n[DEBUG 2/3] Weighted Loss Components at t=3:")
+            print(f"  - PDE Loss Contribution  : {final_W_PDE * loss_pde_t3.item():.4e} (W_PDE={final_W_PDE:.2f} * Loss={loss_pde_t3.item():.4e})")
+            print(f"  - Norm Loss Contribution : {final_W_NORM * loss_norm_t3.item():.4e} (W_NORM={final_W_NORM:.2f} * Loss={loss_norm_t3.item():.4e})")
+            print(f"  - IC Loss is not applicable at t > 0. (Final W_IC was {final_W_IC:.2f})")
+
+            # --- 3. Get the x_center (expectation value) at t=3 ---
+            # This uses the same logic as your existing post-processing sanity check.
+            EVAL_X_MIN_DBG = xc_final - L
+            EVAL_X_MAX_DBG = xc_final + L
+            x_line_dbg = torch.linspace(EVAL_X_MIN_DBG, EVAL_X_MAX_DBG, 4096, device=device).unsqueeze(1)
+            y0_line_dbg = torch.zeros_like(x_line_dbg)
+            z0_line_dbg = torch.zeros_like(x_line_dbg)
+            t_final_line_dbg = torch.full_like(x_line_dbg, T_MAX)
+            
+            u_pred_line, v_pred_line = model(x_line_dbg, y0_line_dbg, z0_line_dbg, t_final_line_dbg)
+            psi_sq_line = (u_pred_line**2 + v_pred_line**2).squeeze()
+            
+            dx = (EVAL_X_MAX_DBG - EVAL_X_MIN_DBG) / (4096 - 1)
+            numerator = (psi_sq_line * x_line_dbg.squeeze()).sum() * dx
+            denominator = psi_sq_line.sum() * dx
+            x_center_t3 = numerator / denominator
+
+            print("\n[DEBUG 3/3] PINN Wave Packet Center at t=3:")
+            print(f"  - Calculated <x> = {x_center_t3.item():.4f}")
+
+    debug_final_time_state(model, domain_volume)
     print("Training finished.")
 
     MODEL_PATH = "pinn_schrodinger_3d.pth"

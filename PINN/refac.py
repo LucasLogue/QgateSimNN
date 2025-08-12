@@ -18,6 +18,7 @@ import os
 # CONFIG = "6-FAST" #10000epoch, small grid
 # CONFIG = "6-SLOW" #25000 epoch, bigger grid
 CONFIG = "6-MID" #20000 epoch, small grid
+#mid gets better fidelity, but slow puts us flat on the center confidently. yknow type stuff
 
 if CONFIG == "6-FAST":
     NUM_ITERATIONS = 10000
@@ -27,7 +28,7 @@ if CONFIG == "6-FAST":
     N_NORM = 4096
     LAYERS = [4] + [128] * 6 + [2]
 elif CONFIG == "6-MID":
-    NUM_ITERATIONS = 25000
+    NUM_ITERATIONS = 20000
     LEARNING_RATE = 2e-5
     N_COLLOCATION = 4096
     N_INITIAL = 2048
@@ -40,6 +41,19 @@ elif CONFIG == "6-SLOW":
     N_INITIAL = 4096
     N_NORM = 8192
     LAYERS = [4] + [128] * 6 + [2]
+elif CONFIG == "8-FAST":
+    #the poor CRC A10 can't handle dis shit cuh 💔 🕊️
+    NUM_ITERATIONS = 15000
+    LEARNING_RATE = 1e-5
+    N_COLLOCATION = 4096
+    N_INITIAL = 2048
+    N_NORM = 4096
+    #exploding amnt
+    # N_COLLOCATION = 8192
+    # N_INITIAL = 4096
+    # N_NORM = 8192
+    LAYERS = [4] + [256] * 8 + [2]
+
 
 #DOMAIN BOUNDARIES
 X_MIN, X_MAX = -10.0, 10.0 
@@ -50,9 +64,6 @@ L = 5.0# Spatial domain length for cutoff function
 
 DOMAIN_VOLUME = (X_MAX - X_MIN) * (Y_MAX - Y_MIN) * (Z_MAX - Z_MIN)
 
-# Network architecture
-# LAYERS = [4] + [128] * 6 + [2]
-# LAYERS = [4] + [256] * 8 + [2]
 
 #=======DEVICE SETUP(CUDA)==========================
 # Set device
@@ -204,7 +215,7 @@ class PINN(nn.Module):
 
 #==========Training Functions================================
 def pde_residual(model, x, y, z, t):
-    """Calculate the residual of the Schrödinger PDE (Optimized)."""
+    """attempt at schrodingies residual calculation"""
     x.requires_grad_(True); y.requires_grad_(True); z.requires_grad_(True); t.requires_grad_(True)
     
     u, v = model(x, y, z, t)
@@ -257,7 +268,7 @@ def fidelity_loss(model):
     x_shifted = x_final - classical_center
     psi_target_final = torch.tensor((1.0 / np.pi)**(0.75), device=device) * torch.exp(-0.5 * (x_shifted**2 + y_final**2 + z_final**2))
 
-    # 4. Calculate fidelity and the loss term using Monte Carlo integration
+    # who tf is monte carlo? but it is monte carlo or so they say
     inner_product = (DOMAIN_VOLUME / PTSFIDELITY) * torch.sum(torch.conj(psi_target_final) * psi_pinn_final)
     norm_pinn_sq = (DOMAIN_VOLUME / PTSFIDELITY) * torch.sum(torch.abs(psi_pinn_final)**2)
     norm_target_sq = (DOMAIN_VOLUME / PTSFIDELITY) * torch.sum(torch.abs(psi_target_final)**2)
@@ -298,36 +309,35 @@ def sample_points():
 #Final anaylsis check
 def run_final_analysis(model):
     """
-    Runs a high-resolution analysis of the final trained model to calculate
-    fidelity and the center of mass at t=3.0.
+    pretty big n accurate analysis for t=3 / t_MAX prolly fix it in future
     """
-    print("\n--- FINAL MODEL ANALYSIS --- 🔎")
+    print("\n--- FINAL MODEL ANALYSIS --- 🤯🤯🤯🤯")
     model.eval()
     with torch.no_grad():
-        # 1. Define a high-resolution grid for the final calculation
+        # Create analysis grid
         N_FINAL_GRID = 4096
         classical_center = Xc_func(T_MAX).item()
         
-        # Define the evaluation domain around the final classical center
-        EVAL_X_MIN = classical_center - L
-        EVAL_X_MAX = classical_center + L
+        #DEFINE THE DOMAIN
+        XMINEVAL = classical_center - L
+        XMAXEVAL = classical_center + L
         
-        x_line = torch.linspace(EVAL_X_MIN, EVAL_X_MAX, N_FINAL_GRID, device=device).unsqueeze(1)
+        x_line = torch.linspace(XMINEVAL, XMAXEVAL, N_FINAL_GRID, device=device).unsqueeze(1)
         y0_line = torch.zeros_like(x_line)
         z0_line = torch.zeros_like(x_line)
         t_final_line = torch.full_like(x_line, T_MAX)
 
-        # 2. Get the PINN's predicted wavefunction
+        #PINN's predicted wavefunction
         u_pred, v_pred = model(x_line, y0_line, z0_line, t_final_line)
         psi_pinn = u_pred + 1j * v_pred
 
-        # 3. Get the true analytical wavefunction at the final position
+        #true analytical wavefunction at the final position
         norm_factor = (1.0 / np.pi)**(0.75)
         x_shifted = x_line - classical_center
         psi_analytic = norm_factor * torch.exp(-0.5 * (x_shifted**2))
 
-        # 4. Calculate Fidelity and Center of Mass (<x>)
-        dx = (EVAL_X_MAX - EVAL_X_MIN) / (N_FINAL_GRID - 1)
+        #dx for fidelity
+        dx = (XMAXEVAL - XMINEVAL) / (N_FINAL_GRID - 1)
         
         # Fidelity
         inner_product = torch.sum(torch.conj(psi_analytic) * psi_pinn) * dx
@@ -335,11 +345,11 @@ def run_final_analysis(model):
         norm_analytic_sq = torch.sum(torch.abs(psi_analytic)**2) * dx
         fidelity = (torch.abs(inner_product)**2) / (norm_pinn_sq * norm_analytic_sq)
         
-        # Center of Mass
+        # Calculate X Center
         numerator = torch.sum(x_line * torch.abs(psi_pinn)**2) * dx
         pinn_center = numerator / norm_pinn_sq
 
-        # 5. Print the final results
+        #Debug Printing
         print(f"  - Final Fidelity      : {fidelity.item():.4f}")
         print(f"  - Final PINN Center <x>: {pinn_center.item():.4f}")
         print(f"  - Target Center        : {classical_center:.4f}")
@@ -352,7 +362,7 @@ if __name__ == "__main__":
     optimizer_adam = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer_adam, step_size=int(NUM_ITERATIONS * 0.25), gamma=0.1)
 
-    print("--- Starting Training (Co-Moving Frame Model) ---")
+    print("🤓🤓🤓 Starting Training (Co-Moving Frame Model) 🤓🤓🤓")
     start_time = time.time()
     for i in range(1, NUM_ITERATIONS+1):
         model.train()
@@ -463,7 +473,7 @@ if __name__ == "__main__":
                 print("---------------------------------")
             model.train() #just incase
     endtime = time.time()
-    print(f"Duration: {start_time-endtime}")
+    print(f"Duration: {endtime - start_time}")
     #Save our better version
     MODEL_PATH = "pinn_schrodinger_3d.pth"
     torch.save(model.state_dict(), MODEL_PATH)

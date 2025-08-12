@@ -27,7 +27,7 @@ if CONFIG == "6-FAST":
     N_NORM = 4096
     LAYERS = [4] + [128] * 6 + [2]
 elif CONFIG == "6-MID":
-    NUM_ITERATIONS = 15000
+    NUM_ITERATIONS = 25000
     LEARNING_RATE = 2e-5
     N_COLLOCATION = 4096
     N_INITIAL = 2048
@@ -68,6 +68,7 @@ W_PDE = 60.0 #kind of seems like the same for how it traces against the statisti
 W_IC = 25.0 #How well it traces against the statistical solution.
 W_NORM = 80.0 #for how well it adheres to P(infinity volume) = 1
 W_REG = 0.5 # Add a small weight for this regularization term
+W_FIDEL = 65.0 #weight for fidelity at final time
 
 #Functions for weight scaling if we want to be doing that
 def get_w_pde(iteration, warmup_steps=(0.3 * NUM_ITERATIONS), max_weight=W_PDE):
@@ -240,6 +241,32 @@ def pde_residual(model, x, y, z, t):
     return f_u, f_v
 
 
+def fidelity_loss(model):
+    PTSFIDELITY = 1024 #number of sampled poitns
+    x_final = (torch.rand(PTSFIDELITY, 1, device=device) * (X_MAX - X_MIN)) + X_MIN
+    y_final = (torch.rand(PTSFIDELITY, 1, device=device) * (Y_MAX - Y_MIN)) + Y_MIN
+    z_final = (torch.rand(PTSFIDELITY, 1, device=device) * (Z_MAX - Z_MIN)) + Z_MIN
+    t_final = torch.full_like(x_final, T_MAX) 
+
+    #Get prediction wavefunc
+    u_pred, v_pred = model(x_final, y_final, z_final, t_final)
+    psi_pinn_final = u_pred + 1j * v_pred
+
+    #Define target state (later will we use the values for the actual target states)
+    classical_center = Xc_func(T_MAX).item()
+    x_shifted = x_final - classical_center
+    psi_target_final = torch.tensor((1.0 / np.pi)**(0.75), device=device) * torch.exp(-0.5 * (x_shifted**2 + y_final**2 + z_final**2))
+
+    # 4. Calculate fidelity and the loss term using Monte Carlo integration
+    inner_product = (DOMAIN_VOLUME / PTSFIDELITY) * torch.sum(torch.conj(psi_target_final) * psi_pinn_final)
+    norm_pinn_sq = (DOMAIN_VOLUME / PTSFIDELITY) * torch.sum(torch.abs(psi_pinn_final)**2)
+    norm_target_sq = (DOMAIN_VOLUME / PTSFIDELITY) * torch.sum(torch.abs(psi_target_final)**2)
+
+
+    epsilon = 1e-8
+    fidelity = (torch.abs(inner_product)**2) / (norm_pinn_sq * norm_target_sq + epsilon)
+    return (1.0 - fidelity)
+
 #===================DATASAMPLING_=======================================
 def sample_points():
     """
@@ -369,13 +396,18 @@ if __name__ == "__main__":
         # The new loss term penalizes the magnitude of the phase gradients to enforce smoothness
         loss_reg = torch.mean(S_x**2) + torch.mean(S_y**2) + torch.mean(S_z**2)
 
+        #Loss for Fidelity
+        loss_fidel = fidelity_loss(model)
+
+
         #Set up the ramping / scaling weights
         W_PDE = get_w_pde(i, #warmup_steps=warmupsteps, 
                     max_weight=60.0)
         w_ic = get_w_ic(i, num_iterations=NUM_ITERATIONS, initial_weight=150.0, final_weight=W_IC)
 
+
         #Final loss estimate
-        total_loss = W_PDE * loss_pde + w_ic * loss_ic + W_NORM * loss_norm + W_REG * loss_reg
+        total_loss = W_PDE * loss_pde + w_ic * loss_ic + W_NORM * loss_norm + W_REG * loss_reg + W_FIDEL*loss_fidel
 
         #Propogate and Step with optim and scheduler
         total_loss.backward()
@@ -389,6 +421,8 @@ if __name__ == "__main__":
             print(f"  - IC Loss   : {w_ic * loss_ic.item():.4e}")
             print(f"  - Norm Loss : {W_NORM * loss_norm.item():.4e}")
             print(f"  - Reg Loss  : {W_REG * loss_reg.item():.4e}")
+            print(f"  - Fidelity Loss  : {W_FIDEL * loss_fidel.item():.4e}")
+
 
             model.eval() #set to evaluation for debug
             with torch.no_grad():
@@ -397,7 +431,7 @@ if __name__ == "__main__":
                 XMINEVAL = x_shift_final - L
                 XMAXEVAL = x_shift_final + L
 
-                x_line = torch.linspace(XMAXEVAL, XMINEVAL, N_DBG, device=device).unsqueeze(1)
+                x_line = torch.linspace(XMINEVAL, XMAXEVAL, N_DBG, device=device).unsqueeze(1)
                 y0_line = torch.zeros_like(x_line)
                 z0_line = torch.zeros_like(x_line)
                 #set time = 3 for all points on the meshgrid
@@ -428,7 +462,8 @@ if __name__ == "__main__":
                 print(f"  - Target Center  : {x_shift_final:.4f}")
                 print("---------------------------------")
             model.train() #just incase
-    
+    endtime = time.time()
+    print(f"Duration: {start_time-endtime}")
     #Save our better version
     MODEL_PATH = "pinn_schrodinger_3d.pth"
     torch.save(model.state_dict(), MODEL_PATH)
